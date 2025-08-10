@@ -17,7 +17,7 @@ if not TOKEN:
 logging.basicConfig(level=logging.DEBUG)
 telebot.logger.setLevel(logging.DEBUG)
 
-bot = telebot.TeleBot("8167277248:AAFKcBe4YlDufX4z8wowACEXDU64FyaEAQs")
+bot = telebot.TeleBot(TOKEN)
 
 # Game states stored per chat_id
 games = {}
@@ -249,17 +249,12 @@ def home():
     return "Bot is running!"
 
 
-def run():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+def run_bot():
+    bot.infinity_polling()
 
 # Start Flask server in a separate thread so it doesn't block the bot
-threading.Thread(target=run).start()
 
 if __name__ == '__main__':
-    print("Bot running...")
-    while True:
-        try:
-            bot.infinity_polling()
-        except Exception as e:
-            logging.error(f"Polling error: {e}")
+    threading.Thread(target=run_bot).start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

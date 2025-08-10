@@ -237,6 +237,22 @@ def cmd_reset(message):
     except Exception as e:
         logging.error(f"Error in /reset: {e}")
 
+
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run():
+    app.run(host='0.0.0.0', port=5000)
+
+# Start Flask server in a separate thread so it doesn't block the bot
+threading.Thread(target=run).start()
+
 if __name__ == '__main__':
     print("Bot running...")
     while True:

@@ -1,1 +1,1 @@
-web: python hand_cricket_bot.py
+web: python test.py

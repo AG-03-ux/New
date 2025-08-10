@@ -1,3 +1,4 @@
+print("Starting hand cricket bot...")
 import telebot
 from telebot import types
 import random
@@ -247,9 +248,10 @@ app = Flask(__name__)
 def home():
     return "Bot is running!"
 
+
 def run():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
 
 # Start Flask server in a separate thread so it doesn't block the bot
 threading.Thread(target=run).start()

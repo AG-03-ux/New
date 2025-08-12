@@ -246,16 +246,15 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "Bot is running!",200
 
 
-def run_bot():
-    bot.infinity_polling()
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
-# Start Flask server in a separate thread so it doesn't block the bot
+if __name__ == "__main__":
+    # Start bot polling in a separate thread
+    threading.Thread(target=lambda: bot.infinity_polling()).start()
 
-if __name__ == '__main__':
-    threading.Thread(target=run_bot).start()
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Starting Flask server on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    # Start the Flask server
+    run_flask()

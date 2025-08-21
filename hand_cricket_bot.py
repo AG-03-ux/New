@@ -555,7 +555,7 @@ if __name__ == "__main__":
     t.start()
     run_flask()
 '''
-path = "/mnt/data/hand_cricket_pro_bot.py"
+path = "hand_cricket_data.json"
 with open(path, "w", encoding="utf-8") as f:
     f.write(code)
 

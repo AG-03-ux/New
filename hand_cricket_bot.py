@@ -2,6 +2,13 @@
 # Clean, production-ready: polling locally, webhooks on Render, GIF reactions
 
 import os
+
+SIX_GIF_URL = os.getenv("SIX_GIF_URL")
+WICKET_GIF_URL = os.getenv("WICKET_GIF_URL")
+WIN_GIF_URL = os.getenv("WIN_GIF_URL")
+LOSE_GIF_URL = os.getenv("LOSE_GIF_URL")
+TIE_GIF_URL = os.getenv("TIE_GIF_URL")
+
 import random
 import logging
 import threading

@@ -305,13 +305,27 @@ if __name__ == "__main__":
     if USE_WEBHOOK:
         if not WEBHOOK_URL:
             raise ValueError("USE_WEBHOOK=1 but WEBHOOK_URL is not set")
-        try: bot.remove_webhook()
-        except: pass
+        
+        # Remove old webhook safely
+        try:
+            bot.remove_webhook()
+            logging.info("Old webhook removed successfully.")
+        except Exception as e:
+            logging.warning(f"Failed to remove old webhook: {e}")
+
+        # Set new webhook
         full_url = WEBHOOK_URL.rstrip("/") + "/webhook"
-        if bot.set_webhook(url=full_url):
-            logging.info(f"Webhook set to: {full_url}")
-        else:
-            logging.warning("Failed to set webhook via API")
+        try:
+            if bot.set_webhook(url=full_url):
+                logging.info(f"Webhook successfully set to: {full_url}")
+            else:
+                logging.warning(f"Failed to set webhook via API to: {full_url}")
+        except Exception as e:
+            logging.error(f"Exception during set_webhook: {e}")
+
+        # Start Flask server (keep service alive)
         run_flask()
     else:
+        # Only for local dev; never used on Render with webhook
         run_polling()
+

@@ -24,6 +24,8 @@ from telebot import types
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+print("[DEBUG] Loaded TELEGRAM_BOT_TOKEN:", TOKEN)
+
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN (or BOT_TOKEN) is not set")
 

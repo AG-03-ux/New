@@ -1,20 +1,12 @@
 # hand_cricket_bot.py
-# Clean, production-ready: polling locally, webhooks on Render, GIF reactions
+# Production-ready Hand Cricket Bot with GIFs and webhook/polling support
 
 import os
-
-SIX_GIF_URL = os.getenv("SIX_GIF_URL")
-WICKET_GIF_URL = os.getenv("WICKET_GIF_URL")
-WIN_GIF_URL = os.getenv("WIN_GIF_URL")
-LOSE_GIF_URL = os.getenv("LOSE_GIF_URL")
-TIE_GIF_URL = os.getenv("TIE_GIF_URL")
-
 import random
 import logging
 import threading
 from dotenv import load_dotenv
 from flask import Flask, request
-
 import telebot
 from telebot import types
 
@@ -24,16 +16,14 @@ from telebot import types
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
-print("[DEBUG] Loaded TELEGRAM_BOT_TOKEN:", TOKEN)
-
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN (or BOT_TOKEN) is not set")
 
-USE_WEBHOOK = os.getenv("USE_WEBHOOK", "0") == "1"   # 1 = use Flask/webhook (Render); 0 = polling
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")           # e.g., https://your-domain.onrender.com
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "0") == "1"  # 1 = use webhook/Render, 0 = polling
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")          # e.g., https://your-domain.onrender.com
 PORT = int(os.getenv("PORT", "5000"))
 
-# Optional GIFs (either URLs or leave blank to auto-fallback to local assets)
+# Optional GIFs
 SIX_GIF_URL = os.getenv("SIX_GIF_URL", "")
 WICKET_GIF_URL = os.getenv("WICKET_GIF_URL", "")
 WIN_GIF_URL = os.getenv("WIN_GIF_URL", "")
@@ -50,14 +40,13 @@ bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 # =========================
 # Game State
 # =========================
-# Per-chat games
 games = {}
 
 def new_game(chat_id):
     games[chat_id] = {
-        "stage": "toss",               # toss | first_innings | second_innings | finished
-        "user_batting_first": None,    # True/False
-        "innings": 0,                  # 0 | 1 | 2
+        "stage": "toss",
+        "user_batting_first": None,
+        "innings": 0,
         "user_score": 0,
         "bot_score": 0,
         "target": None,
@@ -96,36 +85,23 @@ def format_score(g):
 # GIF helpers
 # =========================
 def _send_animation_by_url_or_asset(chat_id, url: str, asset_path: str):
-    """Try URL first; if missing/fails, try local asset."""
-    # 1) Try URL (if provided)
     if url:
         try:
             bot.send_animation(chat_id, url)
             return
         except Exception as e:
             logging.warning(f"GIF URL send failed for {url}: {e}")
-
-    # 2) Try local file (assets/<name>.gif)
     try:
         with open(asset_path, "rb") as f:
             bot.send_animation(chat_id, f)
     except Exception as e:
         logging.info(f"No local GIF at {asset_path} (or send failed): {e}")
 
-def gif_six(chat_id):
-    _send_animation_by_url_or_asset(chat_id, SIX_GIF_URL, "assets/six.gif")
-
-def gif_wicket(chat_id):
-    _send_animation_by_url_or_asset(chat_id, WICKET_GIF_URL, "assets/wicket.gif")
-
-def gif_win(chat_id):
-    _send_animation_by_url_or_asset(chat_id, WIN_GIF_URL, "assets/win.gif")
-
-def gif_lose(chat_id):
-    _send_animation_by_url_or_asset(chat_id, LOSE_GIF_URL, "assets/lose.gif")
-
-def gif_tie(chat_id):
-    _send_animation_by_url_or_asset(chat_id, TIE_GIF_URL, "assets/tie.gif")
+def gif_six(chat_id): _send_animation_by_url_or_asset(chat_id, SIX_GIF_URL, "assets/six.gif")
+def gif_wicket(chat_id): _send_animation_by_url_or_asset(chat_id, WICKET_GIF_URL, "assets/wicket.gif")
+def gif_win(chat_id): _send_animation_by_url_or_asset(chat_id, WIN_GIF_URL, "assets/win.gif")
+def gif_lose(chat_id): _send_animation_by_url_or_asset(chat_id, LOSE_GIF_URL, "assets/lose.gif")
+def gif_tie(chat_id): _send_animation_by_url_or_asset(chat_id, TIE_GIF_URL, "assets/tie.gif")
 
 def safe_reply(message, text):
     try:
@@ -148,7 +124,7 @@ def send_welcome(message):
         "/bowl N - bowl with number 1–6\n"
         "/score - show the score\n"
         "/reset - reset the game\n\n"
-        "Tip: Add some GIFs in <code>assets/</code> or set GIF URLs via env vars!"
+        "Tip: Add GIFs in <code>assets/</code> or set GIF URLs via env vars!"
     )
 
 @bot.message_handler(commands=['play'])
@@ -165,19 +141,14 @@ def cmd_toss(message):
         if chat_id not in games:
             new_game(chat_id)
         g = games[chat_id]
-
-        user_choice = None
-        if len(args) >= 2:
-            user_choice = args[1].lower()
-            if user_choice not in ("heads", "tails"):
-                safe_reply(bot, message, "Invalid choice. Use /toss heads or /toss tails.")
-                return
-
+        user_choice = args[1].lower() if len(args) >= 2 else None
+        if user_choice and user_choice not in ("heads", "tails"):
+            safe_reply(message, "Invalid choice. Use /toss heads or /toss tails.")
+            return
         coin, choice, win = toss_result(user_choice)
         g["last_event"] = f"Coin: <b>{coin}</b>, You: <i>{choice}</i>."
         g["stage"] = "first_innings"
         g["innings"] = 1
-
         if win:
             g["user_batting_first"] = True
             g["last_event"] += " You won and bat first! Use <code>/bat N</code>."
@@ -197,12 +168,10 @@ def cmd_bat(message):
             safe_reply(message, "No active batting. Start a game first with /play.")
             return
         g = games[chat_id]
-
         user_batting = (g["user_batting_first"] and g["innings"] == 1) or (not g["user_batting_first"] and g["innings"] == 2)
         if not user_batting:
             safe_reply(message, "You are bowling now!")
             return
-
         try:
             pick = int(args[1])
         except:
@@ -211,13 +180,8 @@ def cmd_bat(message):
         if not 1 <= pick <= 6:
             safe_reply(message, "Pick must be 1–6.")
             return
-
         bot_pick = bot_move()
-
-        # Six GIF for fun
-        if pick == 6 and not check_out(pick, bot_pick):
-            gif_six(chat_id)
-
+        if pick == 6 and not check_out(pick, bot_pick): gif_six(chat_id)
         if check_out(pick, bot_pick):
             g["last_event"] = f"You: {pick}, Bot: {bot_pick} — <b>OUT!</b>"
             gif_wicket(chat_id)
@@ -228,15 +192,9 @@ def cmd_bat(message):
                 g["last_event"] += f" Target for bot: <b>{g['target']}</b>. Now bowl with <code>/bowl N</code>!"
             else:
                 g["stage"] = "finished"
-                if g["user_score"] > g["bot_score"]:
-                    g["last_event"] += " <b>You win!</b>"
-                    gif_win(chat_id)
-                elif g["user_score"] < g["bot_score"]:
-                    g["last_event"] += " <b>Bot wins!</b>"
-                    gif_lose(chat_id)
-                else:
-                    g["last_event"] += " <b>It's a tie!</b>"
-                    gif_tie(chat_id)
+                if g["user_score"] > g["bot_score"]: g["last_event"] += " <b>You win!</b>"; gif_win(chat_id)
+                elif g["user_score"] < g["bot_score"]: g["last_event"] += " <b>Bot wins!</b>"; gif_lose(chat_id)
+                else: g["last_event"] += " <b>It's a tie!</b>"; gif_tie(chat_id)
         else:
             g["user_score"] += pick
             g["last_event"] = f"You: {pick}, Bot: {bot_pick} — Runs: +{pick}"
@@ -244,7 +202,6 @@ def cmd_bat(message):
                 g["stage"] = "finished"
                 g["last_event"] += " You reached target! <b>You win!</b>"
                 gif_win(chat_id)
-
         safe_reply(message, g["last_event"])
     except Exception as e:
         logging.error(f"Error in /bat: {e}")
@@ -258,12 +215,10 @@ def cmd_bowl(message):
             safe_reply(message, "No active bowling. Start a game first with /play.")
             return
         g = games[chat_id]
-
         user_batting = (g["user_batting_first"] and g["innings"] == 1) or (not g["user_batting_first"] and g["innings"] == 2)
         if user_batting:
             safe_reply(message, "You are batting now!")
             return
-
         try:
             pick = int(args[1])
         except:
@@ -272,9 +227,7 @@ def cmd_bowl(message):
         if not 1 <= pick <= 6:
             safe_reply(message, "Pick must be 1–6.")
             return
-
         bot_pick = bot_move()
-
         if check_out(pick, bot_pick):
             g["last_event"] = f"You: {pick}, Bot: {bot_pick} — <b>BOT OUT!</b>"
             gif_wicket(chat_id)
@@ -285,15 +238,9 @@ def cmd_bowl(message):
                 g["last_event"] += f" Target for you: <b>{g['target']}</b>. Now bat with <code>/bat N</code>!"
             else:
                 g["stage"] = "finished"
-                if g["bot_score"] > g["user_score"]:
-                    g["last_event"] += " <b>Bot wins!</b>"
-                    gif_lose(chat_id)
-                elif g["bot_score"] < g["user_score"]:
-                    g["last_event"] += " <b>You win!</b>"
-                    gif_win(chat_id)
-                else:
-                    g["last_event"] += " <b>It's a tie!</b>"
-                    gif_tie(chat_id)
+                if g["bot_score"] > g["user_score"]: g["last_event"] += " <b>Bot wins!</b>"; gif_lose(chat_id)
+                elif g["bot_score"] < g["user_score"]: g["last_event"] += " <b>You win!</b>"; gif_win(chat_id)
+                else: g["last_event"] += " <b>It's a tie!</b>"; gif_tie(chat_id)
         else:
             g["bot_score"] += bot_pick
             g["last_event"] = f"You: {pick}, Bot: {bot_pick} — Bot scores +{bot_pick}"
@@ -301,7 +248,6 @@ def cmd_bowl(message):
                 g["stage"] = "finished"
                 g["last_event"] += " Bot reached target! <b>Bot wins!</b>"
                 gif_lose(chat_id)
-
         safe_reply(message, g["last_event"])
     except Exception as e:
         logging.error(f"Error in /bowl: {e}")
@@ -327,7 +273,7 @@ def cmd_reset(message):
         logging.error(f"Error in /reset: {e}")
 
 # =========================
-# Flask (for webhooks/health)
+# Flask (webhook)
 # =========================
 app = Flask(__name__)
 
@@ -339,7 +285,7 @@ def home():
 def telegram_webhook():
     try:
         json_str = request.get_data().decode("utf-8")
-        update = telebot.types.Update.de_json(json_str)
+        update = types.Update.de_json(json_str)
         bot.process_new_updates([update])
     except Exception as e:
         logging.exception(f"Webhook processing failed: {e}")
@@ -350,7 +296,6 @@ def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
 def run_polling():
-    # Long-polling loop (keeps process alive)
     bot.infinity_polling(skip_pending=True)
 
 # =========================
@@ -358,22 +303,15 @@ def run_polling():
 # =========================
 if __name__ == "__main__":
     if USE_WEBHOOK:
-        # Set webhook once at startup
         if not WEBHOOK_URL:
             raise ValueError("USE_WEBHOOK=1 but WEBHOOK_URL is not set")
-        # Remove previous webhook and set the new one
-        try:
-            bot.remove_webhook()
-        except Exception:
-            pass
+        try: bot.remove_webhook()
+        except: pass
         full_url = WEBHOOK_URL.rstrip("/") + "/webhook"
         if bot.set_webhook(url=full_url):
             logging.info(f"Webhook set to: {full_url}")
         else:
             logging.warning("Failed to set webhook via API")
-
-        # Start Flask server (single process keeps service alive)
         run_flask()
     else:
-        # Polling (local dev or simple hosting)
         run_polling()

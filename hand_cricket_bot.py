@@ -1,5 +1,6 @@
 import os
 import logging
+import random
 from flask import Flask, request
 import telebot
 
@@ -48,34 +49,117 @@ games = {}  # chat_id -> game state
 # Game Functions
 # -------------------------
 def start_game(chat_id):
-    games[chat_id] = {"batting": None, "score": 0, "balls": []}
-    bot.send_message(chat_id, "New game created! Use /toss heads or /toss tails to start the toss.")
+    games[chat_id] = {
+        "toss_done": False,
+        "batting": None,        # "player" or "bot"
+        "innings": 1,           # 1 or 2
+        "player_score": 0,
+        "bot_score": 0,
+        "target": None,
+        "out": False,
+        "balls": 0
+    }
+    bot.send_message(chat_id, "🏏 New game created!\nUse <b>/toss heads</b> or <b>/toss tails</b> to start the toss.")
 
 def toss(chat_id, choice):
-    import random
+    state = games.get(chat_id)
+    if not state: return
+
     coin = random.choice(["heads", "tails"])
     if choice == coin:
-        games[chat_id]["batting"] = "player"
-        bot.send_message(chat_id, f"Coin: {coin}, You: {choice}. You won and bat first! Use /bat N.")
+        state["batting"] = "player"
+        bot.send_message(chat_id, f"🪙 Coin: {coin}. You won the toss and bat first!\nUse /bat N (1–6).")
     else:
-        games[chat_id]["batting"] = "bot"
-        bot.send_message(chat_id, f"Coin: {coin}, You: {choice}. You lost the toss. Bot bats first!")
+        state["batting"] = "bot"
+        bot.send_message(chat_id, f"🪙 Coin: {coin}. You lost the toss. Bot bats first!\nUse /bowl N (1–6).")
+    state["toss_done"] = True
 
-def bat(chat_id, number):
-    number = int(number)
-    bot_number = telebot.util.rand_num(1, 6)
+def player_bat(chat_id, number):
+    state = games.get(chat_id)
+    if not state or not state["toss_done"]: return
+
+    bot_number = random.randint(1, 6)
+    state["balls"] += 1
+
     if number == bot_number:
-        bot.send_message(chat_id, f"Oops! You got out! Bot chose {bot_number}.")
+        bot.send_message(chat_id, f"❌ OUT! Bot chose {bot_number}.")
         gif_wicket(chat_id)
+        end_innings(chat_id)
     else:
-        games[chat_id]["score"] += number
-        bot.send_message(chat_id, f"You scored {number}. Total: {games[chat_id]['score']}")
+        state["player_score"] += number
+        bot.send_message(chat_id, f"🏏 You scored {number} (Bot: {bot_number}) | Total: {state['player_score']}")
         if number == 6:
             gif_six(chat_id)
 
+        if state["innings"] == 2 and state["player_score"] > state["target"]:
+            end_match(chat_id)
+
+def player_bowl(chat_id, number):
+    state = games.get(chat_id)
+    if not state or not state["toss_done"]: return
+
+    bot_number = random.randint(1, 6)
+    state["balls"] += 1
+
+    if number == bot_number:
+        bot.send_message(chat_id, f"❌ BOT OUT! You bowled {number}.")
+        gif_wicket(chat_id)
+        end_innings(chat_id)
+    else:
+        state["bot_score"] += bot_number
+        bot.send_message(chat_id, f"🤖 Bot scored {bot_number} (You: {number}) | Total: {state['bot_score']}")
+        if bot_number == 6:
+            gif_six(chat_id)
+
+        if state["innings"] == 2 and state["bot_score"] > state["target"]:
+            end_match(chat_id)
+
+def end_innings(chat_id):
+    state = games.get(chat_id)
+    if not state: return
+
+    if state["innings"] == 1:
+        # Switch innings
+        if state["batting"] == "player":
+            state["target"] = state["player_score"]
+            state["batting"] = "bot"
+            bot.send_message(chat_id, f"End of 1st innings! 🎯 Target for bot: {state['player_score']+1}\nNow use /bowl N.")
+        else:
+            state["target"] = state["bot_score"]
+            state["batting"] = "player"
+            bot.send_message(chat_id, f"End of 1st innings! 🎯 Target for you: {state['bot_score']+1}\nNow use /bat N.")
+        state["innings"] = 2
+        state["balls"] = 0
+    else:
+        # End match
+        end_match(chat_id)
+
+def end_match(chat_id):
+    state = games.get(chat_id)
+    if not state: return
+
+    p, b = state["player_score"], state["bot_score"]
+    msg = f"🏁 Match Over!\n\nYou: {p}\nBot: {b}\n\n"
+
+    if p > b:
+        msg += "🎉 You WIN!"
+        gif_win(chat_id)
+    elif b > p:
+        msg += "🤖 Bot WINS!"
+        gif_lose(chat_id)
+    else:
+        msg += "😮 It's a TIE!"
+        gif_tie(chat_id)
+
+    bot.send_message(chat_id, msg)
+    del games[chat_id]  # reset game
+
 def score(chat_id):
-    s = games.get(chat_id, {}).get("score", 0)
-    bot.send_message(chat_id, f"Current score: {s}")
+    state = games.get(chat_id)
+    if not state:
+        bot.send_message(chat_id, "No game in progress. Use /play to start.")
+        return
+    bot.send_message(chat_id, f"📊 Score:\nYou: {state['player_score']}\nBot: {state['bot_score']}")
 
 def reset_game(chat_id):
     if chat_id in games: del games[chat_id]
@@ -98,7 +182,21 @@ def cmd_toss(message):
 def cmd_bat(message):
     parts = message.text.split()
     if len(parts) < 2: return
-    bat(message.chat.id, parts[1])
+    try:
+        num = int(parts[1])
+        if 1 <= num <= 6:
+            player_bat(message.chat.id, num)
+    except: pass
+
+@bot.message_handler(commands=["bowl"])
+def cmd_bowl(message):
+    parts = message.text.split()
+    if len(parts) < 2: return
+    try:
+        num = int(parts[1])
+        if 1 <= num <= 6:
+            player_bowl(message.chat.id, num)
+    except: pass
 
 @bot.message_handler(commands=["score"])
 def cmd_score(message):

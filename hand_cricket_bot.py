@@ -10,6 +10,9 @@ from flask import Flask, request
 import telebot
 from telebot import types
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ======================================================
 # Environment / Config
 # ======================================================

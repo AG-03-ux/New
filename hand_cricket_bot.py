@@ -517,9 +517,12 @@ app = Flask(__name__)
 # Existing webhook route (do NOT touch)
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+    data = request.stream.read().decode("utf-8")
+    logger.info(f"Received Telegram update: {data[:200]}...")  # log first 200 chars
+    update = telebot.types.Update.de_json(data)
     bot.process_new_updates([update])
     return "OK", 200
+
 
 # New route to stop Render 404 looping
 @app.route("/", methods=["GET"])

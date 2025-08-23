@@ -514,11 +514,23 @@ def get_leaderboard(limit: int = 10) -> str:
 # ======================================================
 app = Flask(__name__)
 
+# Existing webhook route (do NOT touch)
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
     bot.process_new_updates([update])
     return "OK", 200
+
+# New route to stop Render 404 looping
+@app.route("/", methods=["GET"])
+def index():
+    return "Hand Cricket Bot is running!", 200
+
+# Optional: dedicated health check
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
 
 
 def run_flask():

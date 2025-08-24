@@ -17,9 +17,9 @@ load_dotenv()
 # Environment / Config
 # ======================================================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # required
-USE_WEBHOOK = int(os.getenv("USE_WEBHOOK", "0"))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-PORT = int(os.getenv("PORT", 5000))
+USE_WEBHOOK = int(os.getenv("USE_WEBHOOK", "0"))  # 1 for webhook, 0 for polling
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # e.g., https://yourdomain.onrender.com
+PORT = int(os.getenv("PORT", 5000))  # Render sets this automatically
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 DB_PATH = os.getenv("DB_PATH", "cricket_bot.db")
 DEFAULT_OVERS = int(os.getenv("DEFAULT_OVERS", "2"))
@@ -176,7 +176,7 @@ def default_game(overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS) -> 
     overs = max(1, min(overs, MAX_OVERS))
     wickets = max(1, min(wickets, MAX_WICKETS))
     return dict(
-        state="toss",              # toss, play, break, finished
+        state="toss",              # toss, play, finished
         innings=1,                 # 1 or 2
         batting=None,              # "player" or "bot"
         player_score=0,
@@ -281,6 +281,7 @@ def start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFA
         "Tap to toss a coin and decide who starts:"
     ), reply_markup=kb_toss_choice())
     log_event(chat_id, "game_start", f"overs={g['overs_limit']} wickets={g['wickets_limit']}")
+    logger.debug(f"New game saved for chat {chat_id}: {g}")
 
 
 def set_batting(chat_id: int, who: str):
@@ -420,26 +421,16 @@ def end_innings(chat_id: int):
         end_match(chat_id)
 
 
-def end_match(chat_id: int):
-    g = load_game(chat_id)
-    if not g:
-        return
-
+def _finalize_match_message(g: Dict[str, Any]) -> str:
     p, b = g["player_score"], g["bot_score"]
-    # Update stats for the last human who interacted in this chat is tricky; we credit the last message's user via middleware commands
-    # For simplicity, we won't change per-user tally here; that happens on command handlers where we know message.from_user
-
     if p > b:
         result = "🎉 <b>You WIN!</b>"
-        _send_animation(chat_id, "win")
         outcome = "win"
     elif b > p:
         result = "🤖 <b>Bot WINS!</b>"
-        _send_animation(chat_id, "lose")
         outcome = "loss"
     else:
         result = "😮 <b>It's a TIE!</b>"
-        _send_animation(chat_id, "tie")
         outcome = "tie"
 
     summary = (
@@ -449,6 +440,25 @@ def end_match(chat_id: int):
         f"Result: {result}\n\n"
         "Use /play to start a new game or /leaderboard to see rankings."
     )
+    return summary, outcome
+
+
+def end_match(chat_id: int):
+    g = load_game(chat_id)
+    if not g:
+        return
+
+    p, b = g["player_score"], g["bot_score"]
+
+    # Animations
+    if p > b:
+        _send_animation(chat_id, "win")
+    elif b > p:
+        _send_animation(chat_id, "lose")
+    else:
+        _send_animation(chat_id, "tie")
+
+    summary, outcome = _finalize_match_message(g)
     bot.send_message(chat_id, summary)
     log_event(chat_id, "match_over", f"p={p} b={b} outcome={outcome}")
     delete_game(chat_id)
@@ -504,44 +514,50 @@ def get_leaderboard(limit: int = 10) -> str:
             return "No players yet. Be the first! Use /play"
         lines = ["🏆 <b>Leaderboard</b>"]
         for i, r in enumerate(rows, 1):
-            name = r["first_name"] or ("@" + (r["username"] or "unknown"))
-            lines.append(f"{i}. {name} — {r['wins']} win(s), HS {r['high_score']}")
+            display = r["first_name"] or (("@" + r["username"]) if r["username"] else "Unknown")
+            lines.append(f"{i}. {display} — {r['wins']} win(s), HS {r['high_score']}")
         return "\n".join(lines)
 
 
 # ======================================================
-# Flask Webhook
+# Middleware: credit last interacting user when match ends
 # ======================================================
-app = Flask(__name__)
 
-# Existing webhook route (do NOT touch)
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.stream.read().decode("utf-8")
-    logger.info(f"Received Telegram update: {data[:200]}...")  # log first 200 chars
-    update = telebot.types.Update.de_json(data)
-    bot.process_new_updates([update])
-    return "OK", 200
-
-
-# New route to stop Render 404 looping
-@app.route("/", methods=["GET"])
-def index():
-    return "Hand Cricket Bot is running!", 200
-
-# Optional: dedicated health check
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
+def credit_last_user(chat_id: int, p_runs: int, b_runs: int):
+    with db_conn() as db:
+        cur = db.execute(
+            "SELECT meta FROM history WHERE chat_id=? AND event='ball_input' ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return
+        meta = row["meta"] or ""
+        try:
+            # meta like: "from=123456 n=4"
+            parts = dict(kv.split("=") for kv in meta.split())
+            uid = int(parts.get("from", "0"))
+        except Exception:
+            return
+        won = (p_runs > b_runs)
+        tied = (p_runs == b_runs)
+        add_result_for_user(uid, p_runs, None if tied else won, tied)
 
 
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
+# Keep a reference to the original end_match
+_original_end_match = end_match
 
+def end_match_hook(chat_id: int):
+    g = load_game(chat_id)
+    if not g:
+        return
+    p, b = g["player_score"], g["bot_score"]
+    credit_last_user(chat_id, p, b)
+    # call original end_match to show summary + cleanup
+    _original_end_match(chat_id)
 
-def run_polling():
-    bot.infinity_polling()
+# Replace end_match with the hook
+end_match = end_match_hook
 
 
 # ======================================================
@@ -551,7 +567,6 @@ def run_polling():
 def ensure_user(message: types.Message):
     if message.from_user:
         upsert_user(message.from_user)
-
 
 @bot.message_handler(commands=["start", "help"])  # start doubles as help
 def cmd_help(message: types.Message):
@@ -574,34 +589,32 @@ def cmd_help(message: types.Message):
     )
     bot.reply_to(message, text, reply_markup=kb_bat_numbers())
 
-
 @bot.message_handler(commands=["about"])
 def cmd_about(message: types.Message):
     ensure_user(message)
     bot.reply_to(message, "🏏 <b>Cricket Bot</b> — fast, fun, and open-source friendly.\nMade with ❤️ using Python, Flask and PyTelegramBotAPI.")
 
-
 @bot.message_handler(commands=["play"])
 def cmd_play(message: types.Message):
     ensure_user(message)
-    # read optional format e.g. /play 2 1
-    parts = message.text.split()
+    parts = (message.text or "").split()
     overs, wkts = DEFAULT_OVERS, DEFAULT_WICKETS
     if len(parts) >= 2:
         try:
             overs = int(parts[1])
-        except: pass
+        except Exception:
+            pass
     if len(parts) >= 3:
         try:
             wkts = int(parts[2])
-        except: pass
+        except Exception:
+            pass
     start_new_game(message.chat.id, overs, wkts)
-
 
 @bot.message_handler(commands=["format"])  # set default format for this chat's next /play
 def cmd_format(message: types.Message):
     ensure_user(message)
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) < 3:
         bot.reply_to(message, f"Usage: /format &lt;overs 1..{MAX_OVERS}&gt; &lt;wickets 1..{MAX_WICKETS}&gt;")
         return
@@ -613,7 +626,6 @@ def cmd_format(message: types.Message):
         bot.reply_to(message, f"✅ Default format set to {overs} over(s), {wkts} wicket(s). Use /play to start.")
     except ValueError:
         bot.reply_to(message, "Please provide integers for overs and wickets, e.g. /format 2 1")
-
 
 @bot.message_handler(commands=["score"])
 def cmd_score(message: types.Message):
@@ -630,18 +642,15 @@ def cmd_score(message: types.Message):
         + (f"Target: {g['target'] + 1}\n" if g['target'] is not None else "")
     )
 
-
 @bot.message_handler(commands=["stats"])
 def cmd_stats(message: types.Message):
     ensure_user(message)
     bot.reply_to(message, get_stats_text(message.from_user.id))
 
-
 @bot.message_handler(commands=["leaderboard"])
 def cmd_leaderboard(message: types.Message):
     ensure_user(message)
     bot.reply_to(message, get_leaderboard())
-
 
 @bot.message_handler(commands=["forfeit"])
 def cmd_forfeit(message: types.Message):
@@ -683,13 +692,12 @@ def cq_toss(call: types.CallbackQuery):
 
     bot.answer_callback_query(call.id)
 
-
 @bot.callback_query_handler(func=lambda c: c.data in ("choose_bat", "choose_bowl"))
 def cq_choose(call: types.CallbackQuery):
     g = load_game(call.message.chat.id)
-    if not g or g["state"] != "play" and g["state"] != "toss":
-        # Accept during toss flow only
-        pass
+    if not g or (g["state"] not in ("play", "toss")):
+        bot.answer_callback_query(call.id)
+        return
     who = "player" if call.data == "choose_bat" else "bot"
     set_batting(call.message.chat.id, who)
     bot.answer_callback_query(call.id)
@@ -708,56 +716,50 @@ def on_text(message: types.Message):
     if text.isdigit():
         n = int(text)
         if 1 <= n <= 6:
-            # Before processing, we need to remember who to credit stats to when the match finishes
-            # We'll store the user id in history; the summarization of results will update stats separately
+            # Remember who to credit stats to when the match finishes
+            # We'll store the user id in history
             log_event(message.chat.id, "ball_input", f"from={message.from_user.id} n={n}")
             progress_ball(message.chat.id, n)
             return
 
-    # otherwise ignore to avoid noise in groups
+    # ignore other texts to avoid noise
 
 
 # ======================================================
-# Middleware: After each match, try to credit last interacting user
-# (Simple heuristic: last ball_input in this chat belongs to the human player)
+# Flask Webhook
 # ======================================================
+app = Flask(__name__)
 
-def credit_last_user(chat_id: int, p_runs: int, b_runs: int):
-    with db_conn() as db:
-        cur = db.execute(
-            "SELECT meta FROM history WHERE chat_id=? AND event='ball_input' ORDER BY id DESC LIMIT 1",
-            (chat_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return
-        meta = row["meta"] or ""
-        try:
-            # meta like: from=123456 n=4
-            parts = dict(kv.split("=") for kv in meta.split())
-            uid = int(parts.get("from", "0"))
-        except Exception:
-            return
-        won = (p_runs > b_runs)
-        tied = (p_runs == b_runs)
-        add_result_for_user(uid, p_runs, None if tied else won, tied)
-
-
-# Hook into end_match to credit stats
-orig_end_match = end_match
-
-def end_match(chat_id: int):
-    g = load_game(chat_id)
-    if not g:
-        return
-    p, b = g["player_score"], g["bot_score"]
-    credit_last_user(chat_id, p, b)
-    # call original
-    globals()["end_match"] = orig_end_match  # temporarily restore to avoid recursion
+# Existing webhook route
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    # Minimal logging to confirm reception (avoid logging secrets)
+    data = request.stream.read().decode("utf-8")
+    logger.info(f"Received Telegram update: {data[:200]}...")  # log first 200 chars
+    update = telebot.types.Update.de_json(data)
     try:
-        orig_end_match(chat_id)
-    finally:
-        globals()["end_match"] = end_match  # hook remains for next time
+        bot.process_new_updates([update])
+    except Exception as e:
+        logger.exception(f"Error while processing update: {e}")
+    return "OK", 200
+
+# Root (stops Render 404 loops)
+@app.route("/", methods=["GET"])
+def index():
+    return "Hand Cricket Bot is running!", 200
+
+# Health check for Render
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
+
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+
+def run_polling():
+    bot.infinity_polling()
 
 
 # ======================================================

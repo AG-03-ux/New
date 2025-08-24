@@ -763,6 +763,13 @@ def run_polling():
 
 
 @bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    print("[DEBUG] Inside handle_all_messages")
+    logging.info(f"[DEBUG] Got message: {message.text}")
+    try:
+        bot.reply_to(message, "✅ Bot is alive and responding!")
+    except Exception as e:
+        logging.error(f"[ERROR] Failed to reply: {e}")
 def echo_all(message):
     bot.reply_to(message, f"You said: {message.text}")
 

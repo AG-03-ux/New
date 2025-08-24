@@ -762,6 +762,10 @@ def run_polling():
     bot.infinity_polling()
 
 
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    bot.reply_to(message, f"You said: {message.text}")
+
 # ======================================================
 # Boot
 # ======================================================

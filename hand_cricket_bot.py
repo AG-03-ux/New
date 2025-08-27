@@ -748,6 +748,22 @@ def on_text(message: types.Message):
 # ======================================================
 app = Flask(__name__)
 
+# Ensure webhook is set when running under WSGI servers (e.g., gunicorn on Render)
+if USE_WEBHOOK:
+    if not WEBHOOK_URL:
+        logger.error("USE_WEBHOOK=1 but WEBHOOK_URL is not set")
+    else:
+        try:
+            try:
+                bot.remove_webhook()
+            except Exception:
+                pass
+            full_url = WEBHOOK_URL.rstrip("/") + "/webhook"
+            ok = bot.set_webhook(url=full_url)
+            logger.info(f"Webhook set (WSGI init): {full_url} -> {ok}")
+        except Exception as e:
+            logger.exception(f"Failed to set webhook during WSGI init: {e}")
+
 # Existing webhook route
 @app.route("/webhook", methods=["POST"])
 def webhook():

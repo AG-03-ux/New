@@ -764,18 +764,30 @@ if USE_WEBHOOK:
         except Exception as e:
             logger.exception(f"Failed to set webhook during WSGI init: {e}")
 
-# Existing webhook route
-@app.route("/webhook", methods=["POST"])
+# Webhook route (robust: always return 200 even on malformed payloads)
+@app.route("/webhook", methods=["POST", "GET"])  # GET allowed for health/debug
 def webhook():
-    # Minimal logging to confirm reception (avoid logging secrets)
-    data = request.stream.read().decode("utf-8")
-    logger.info(f"Received Telegram update: {data[:200]}...")  # log first 200 chars
-    update = telebot.types.Update.de_json(data)
     try:
-        bot.process_new_updates([update])
-    except Exception as e:
-        logger.exception(f"Error while processing update: {e}")
-    return "OK", 200
+        raw = request.get_data(as_text=True)
+        logger.info(f"Received Telegram update: {raw[:200]}...")
+        if request.method == "GET":
+            return "OK", 200
+        if not raw:
+            logger.warning("Empty webhook payload")
+            return "OK", 200
+        try:
+            update = telebot.types.Update.de_json(raw)
+        except Exception as parse_err:
+            logger.exception(f"Failed to parse Telegram update: {parse_err}")
+            return "OK", 200
+        try:
+            bot.process_new_updates([update])
+        except Exception as e:
+            logger.exception(f"Error while processing update: {e}")
+        return "OK", 200
+    except Exception as outer:
+        logger.exception(f"Webhook outer error: {outer}")
+        return "OK", 200
 
 # Root (stops Render 404 loops)
 @app.route("/", methods=["GET"])

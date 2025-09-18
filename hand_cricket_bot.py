@@ -794,6 +794,41 @@ def index():
 def health():
     return "OK", 200
 
+# Debug webhook info
+@app.route("/webhook-info", methods=["GET"])
+def webhook_info():
+    try:
+        info = bot.get_webhook_info()
+        return {
+            "webhook_url": info.url,
+            "pending_update_count": info.pending_update_count,
+            "last_error_date": info.last_error_date,
+            "last_error_message": info.last_error_message,
+            "max_connections": info.max_connections,
+            "allowed_updates": info.allowed_updates
+        }, 200
+    except Exception as e:
+        return {"error": str(e)}, 500
+
+# Temporary: manually reset webhook
+@app.route("/reset-webhook", methods=["GET"])
+def reset_webhook():
+    try:
+        # Remove webhook
+        bot.remove_webhook()
+        
+        # Set new webhook
+        full_url = WEBHOOK_URL.rstrip("/") + "/webhook"
+        ok = bot.set_webhook(url=full_url)
+        
+        return {
+            "removed": True,
+            "set_result": ok,
+            "webhook_url": full_url
+        }, 200
+    except Exception as e:
+        return {"error": str(e)}, 500
+
 
 def run_flask():
     logger.info(f"Starting Flask server on port {PORT}")
@@ -849,6 +884,11 @@ if __name__ == "__main__":
             # Remove any existing webhook first
             bot.remove_webhook()
             logger.info("Removed existing webhook")
+            
+            # Wait a moment
+            import time
+            time.sleep(1)
+            
         except Exception as e:
             logger.warning(f"Failed to remove existing webhook: {e}")
         
@@ -859,12 +899,19 @@ if __name__ == "__main__":
             logger.info(f"Webhook set: {full_url} -> {ok}")
             if not ok:
                 logger.error("Failed to set webhook")
-                raise RuntimeError("Webhook setup failed")
+                # Try polling mode as fallback
+                logger.info("Falling back to polling mode...")
+                run_polling()
+            else:
+                # Verify webhook was set
+                webhook_info = bot.get_webhook_info()
+                logger.info(f"Webhook info: URL={webhook_info.url}, Pending={webhook_info.pending_update_count}")
+                run_flask()
+                
         except Exception as e:
             logger.exception(f"Webhook setup error: {e}")
-            raise
-        
-        run_flask()
+            logger.info("Falling back to polling mode...")
+            run_polling()
     else:
         logger.info("Starting polling mode...")
         run_polling()

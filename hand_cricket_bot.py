@@ -18,6 +18,23 @@ from telebot import types
 from dotenv import load_dotenv
 load_dotenv()
 
+
+# Store user session data temporarily
+user_sessions = {}
+
+def get_user_session(user_id: int) -> dict:
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {}
+    return user_sessions[user_id]
+
+def set_session_data(user_id: int, key: str, value):
+    session = get_user_session(user_id)
+    session[key] = value
+
+def get_session_data(user_id: int, key: str, default=None):
+    session = get_user_session(user_id)
+    return session.get(key, default)
+
 # ======================================================
 # Environment / Config
 # ======================================================
@@ -161,6 +178,16 @@ def db_init():
             )
         """)
         
+        # Add this to your db_init() function
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                event TEXT,
+                meta TEXT,
+                created_at TEXT
+            )
+        """)
         # Enhanced stats table
         db.execute("""
             CREATE TABLE IF NOT EXISTS stats (
@@ -372,30 +399,6 @@ def db_init():
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (name, desc, icon, points, req_type, req_val))
 
-def upsert_user(u: types.User):
-    with db_conn() as db:
-        now = datetime.now(timezone.utc).isoformat()
-        db.execute("""
-            INSERT INTO users (
-                user_id, username, first_name, last_name, language_code, 
-                is_premium, created_at, last_active, total_messages
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username=excluded.username,
-                first_name=excluded.first_name,
-                last_name=excluded.last_name,
-                language_code=excluded.language_code,
-                is_premium=excluded.is_premium,
-                last_active=excluded.last_active,
-                total_messages=total_messages + 1
-        """, (u.id, u.username, u.first_name, u.last_name, 
-              u.language_code, getattr(u, 'is_premium', False), now, now))
-        
-        db.execute("""
-            INSERT INTO stats (user_id, created_at, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at
-        """, (u.id, now, now))
 
 def log_event(chat_id: int, event: str, meta: str = ""):
     # Using the existing history table for events
@@ -586,47 +589,136 @@ def get_commentary(g: Dict[str, Any], user_value: int, bot_value: int,
     
     return commentary
 
-def save_game(chat_id: int, g: Dict[str, Any]):
+def safe_save_game(chat_id: int, g: Dict[str, Any]):
+    """Safely save game data with fallback for missing columns"""
     with db_conn() as db:
         now = datetime.now(timezone.utc).isoformat()
         g["updated_at"] = now
         
-        db.execute("""
-            INSERT INTO games (
-                chat_id, state, innings, batting, player_score, bot_score,
-                player_wkts, bot_wkts, balls_in_over, overs_bowled, target,
-                overs_limit, wickets_limit, match_format, difficulty_level,
-                player_balls_faced, bot_balls_faced, player_fours, player_sixes,
-                bot_fours, bot_sixes, extras, powerplay_overs, is_powerplay,
-                weather_condition, pitch_condition, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                state=excluded.state, innings=excluded.innings, batting=excluded.batting,
-                player_score=excluded.player_score, bot_score=excluded.bot_score,
-                player_wkts=excluded.player_wkts, bot_wkts=excluded.bot_wkts,
-                balls_in_over=excluded.balls_in_over, overs_bowled=excluded.overs_bowled,
-                target=excluded.target, player_balls_faced=excluded.player_balls_faced,
-                bot_balls_faced=excluded.bot_balls_faced, player_fours=excluded.player_fours,
-                player_sixes=excluded.player_sixes, bot_fours=excluded.bot_fours,
-                bot_sixes=excluded.bot_sixes, extras=excluded.extras,
-                is_powerplay=excluded.is_powerplay, updated_at=excluded.updated_at
-        """, (
-            chat_id, g["state"], g["innings"], g["batting"],
-            g["player_score"], g["bot_score"], g["player_wkts"], g["bot_wkts"],
-            g["balls_in_over"], g["overs_bowled"], g["target"],
-            g["overs_limit"], g["wickets_limit"], g["match_format"], g["difficulty_level"],
-            g["player_balls_faced"], g["bot_balls_faced"], g["player_fours"], g["player_sixes"],
-            g["bot_fours"], g["bot_sixes"], g["extras"], g["powerplay_overs"], g["is_powerplay"],
-            g["weather_condition"], g["pitch_condition"], g["created_at"], g["updated_at"]
-        ))
+        # Get existing columns in games table
+        cursor = db.cursor()
+        cursor.execute("PRAGMA table_info(games)")
+        existing_columns = [row[1] for row in cursor.fetchall()]
+        
+        # Core required columns that should always exist
+        core_data = {
+            'chat_id': chat_id,
+            'state': g.get("state"),
+            'innings': g.get("innings"),
+            'batting': g.get("batting"),
+            'player_score': g.get("player_score", 0),
+            'bot_score': g.get("bot_score", 0),
+            'player_wkts': g.get("player_wkts", 0),
+            'bot_wkts': g.get("bot_wkts", 0),
+            'balls_in_over': g.get("balls_in_over", 0),
+            'overs_bowled': g.get("overs_bowled", 0),
+            'target': g.get("target"),
+            'overs_limit': g.get("overs_limit", 2),
+            'wickets_limit': g.get("wickets_limit", 1)
+        }
+        
+        # Additional columns that might not exist in old schema
+        extended_data = {
+            'match_format': g.get("match_format", "T2"),
+            'difficulty_level': g.get("difficulty_level", "medium"),
+            'player_balls_faced': g.get("player_balls_faced", 0),
+            'bot_balls_faced': g.get("bot_balls_faced", 0),
+            'player_fours': g.get("player_fours", 0),
+            'player_sixes': g.get("player_sixes", 0),
+            'bot_fours': g.get("bot_fours", 0),
+            'bot_sixes': g.get("bot_sixes", 0),
+            'extras': g.get("extras", 0),
+            'powerplay_overs': g.get("powerplay_overs", 0),
+            'is_powerplay': g.get("is_powerplay", False),
+            'weather_condition': g.get("weather_condition", "clear"),
+            'pitch_condition': g.get("pitch_condition", "normal"),
+            'created_at': g.get("created_at", now),
+            'updated_at': now
+        }
+        
+        # Filter data based on existing columns
+        final_data = core_data.copy()
+        for key, value in extended_data.items():
+            if key in existing_columns:
+                final_data[key] = value
+        
+        # Build dynamic SQL
+        columns = list(final_data.keys())
+        placeholders = ['?' for _ in columns]
+        values = list(final_data.values())
+        
+        # Create SET clause for UPDATE
+        set_clause = ', '.join([f"{col}=excluded.{col}" for col in columns if col != 'chat_id'])
+        
+        sql = f"""
+            INSERT INTO games ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            ON CONFLICT(chat_id) DO UPDATE SET {set_clause}
+        """
+        
+        try:
+            db.execute(sql, values)
+            logger.info(f"Game saved for chat {chat_id} with {len(columns)} columns")
+        except Exception as e:
+            logger.error(f"Failed to save game: {e}")
+            # Fallback to absolute minimum
+            try:
+                db.execute("""
+                    INSERT INTO games (chat_id, state, player_score, bot_score, player_wkts, bot_wkts)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET 
+                        state=excluded.state,
+                        player_score=excluded.player_score,
+                        bot_score=excluded.bot_score,
+                        player_wkts=excluded.player_wkts,
+                        bot_wkts=excluded.bot_wkts
+                """, (chat_id, g.get("state"), g.get("player_score", 0), 
+                      g.get("bot_score", 0), g.get("player_wkts", 0), g.get("bot_wkts", 0)))
+                logger.warning("Used minimal game save as fallback")
+            except Exception as e2:
+                logger.error(f"Even fallback game save failed: {e2}")
+                raise
 
-def load_game(chat_id: int) -> Optional[Dict[str, Any]]:
+def safe_load_game(chat_id: int) -> Optional[Dict[str, Any]]:
+    """Safely load game with fallback for missing columns"""
     with db_conn() as db:
-        cur = db.execute("SELECT * FROM games WHERE chat_id=?", (chat_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        return dict(row)
+        try:
+            cur = db.execute("SELECT * FROM games WHERE chat_id=?", (chat_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            
+            # Convert to dict and add defaults for missing fields
+            game = dict(row)
+            
+            # Ensure all required fields exist with defaults
+            defaults = {
+                'match_format': 'T2',
+                'difficulty_level': 'medium',
+                'player_balls_faced': 0,
+                'bot_balls_faced': 0,
+                'player_fours': 0,
+                'player_sixes': 0,
+                'bot_fours': 0,
+                'bot_sixes': 0,
+                'extras': 0,
+                'powerplay_overs': 0,
+                'is_powerplay': False,
+                'weather_condition': 'clear',
+                'pitch_condition': 'normal',
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            }
+            
+            for key, default_value in defaults.items():
+                if key not in game or game[key] is None:
+                    game[key] = default_value
+            
+            return game
+            
+        except Exception as e:
+            logger.error(f"Failed to load game: {e}")
+            return None 
 
 def delete_game(chat_id: int):
     with db_conn() as db:
@@ -736,22 +828,23 @@ def kb_post_match() -> types.InlineKeyboardMarkup:
 # Enhanced Game Flow
 # ======================================================
 
-def start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
-                   difficulty: str = "medium", user_id: int = None):
+def safe_start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
+                       difficulty: str = "medium", user_id: int = None):
+    """Safely start new game with schema compatibility"""
     g = default_game(overs, wickets, difficulty)
-    save_game(chat_id, g)
+    safe_save_game(chat_id, g)
     
-    # Get weather and pitch info
-    weather = WEATHER_CONDITIONS[g["weather_condition"]]
-    pitch = PITCH_CONDITIONS[g["pitch_condition"]]
+    # Get weather and pitch info safely
+    weather = WEATHER_CONDITIONS.get(g.get("weather_condition", "clear"), {"description": "Clear skies"})
+    pitch = PITCH_CONDITIONS.get(g.get("pitch_condition", "normal"), {"description": "Normal pitch"})
     
     match_info = (
         f"🏏 <b>New Match Started!</b>\n\n"
         f"📋 <b>Match Details:</b>\n"
-        f"Format: <b>{g['match_format']} ({g['overs_limit']} over{'s' if g['overs_limit'] > 1 else ''}, "
-        f"{g['wickets_limit']} wicket{'s' if g['wickets_limit'] > 1 else ''})</b>\n"
-        f"Difficulty: <b>{difficulty.title()}</b> {DIFFICULTY_SETTINGS[difficulty]['description']}\n"
-        f"Powerplay: <b>{g['powerplay_overs']} over{'s' if g['powerplay_overs'] > 1 else ''}</b>\n\n"
+        f"Format: <b>{g.get('match_format', 'T2')} ({g.get('overs_limit', 2)} over{'s' if g.get('overs_limit', 2) > 1 else ''}, "
+        f"{g.get('wickets_limit', 1)} wicket{'s' if g.get('wickets_limit', 1) > 1 else ''})</b>\n"
+        f"Difficulty: <b>{difficulty.title()}</b>\n"
+        f"Powerplay: <b>{g.get('powerplay_overs', 0)} over{'s' if g.get('powerplay_overs', 0) > 1 else ''}</b>\n\n"
         f"🌤️ <b>Conditions:</b>\n"
         f"Weather: {weather['description']}\n"
         f"Pitch: {pitch['description']}\n\n"
@@ -759,39 +852,48 @@ def start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFA
     )
     
     bot.send_message(chat_id, match_info, reply_markup=kb_toss_choice())
-    log_event(chat_id, "match_start", 
-              f"format={g['match_format']} difficulty={difficulty} user={user_id}")
+    log_event(chat_id, "match_start", f"format={g.get('match_format', 'T2')} difficulty={difficulty} user={user_id}")
 
-def set_batting_order(chat_id: int, first_batting: str):
-    g = load_game(chat_id)
-    if not g:
-        return
-    
-    g["state"] = "play"
-    g["batting"] = first_batting
-    g["is_powerplay"] = True
-    save_game(chat_id, g)
-    
-    powerplay_text = f"⚡ <b>Powerplay active</b> (first {g['powerplay_overs']} overs)" if g['powerplay_overs'] > 0 else ""
-    
-    if first_batting == "player":
-        msg = (
-            f"🏏 <b>You're batting first!</b>\n\n"
-            f"{powerplay_text}\n"
-            f"Send a number 1️⃣-6️⃣ to play each ball.\n"
-            f"Match the bot's number = <b>OUT!</b> ❌\n"
-            f"Different numbers = <b>RUNS!</b> ✅"
-        )
-    else:
-        msg = (
-            f"🎯 <b>Bot batting first! You're bowling.</b>\n\n"
-            f"{powerplay_text}\n"
-            f"Send a number 1️⃣-6️⃣ to bowl each ball.\n"
-            f"Match the bot's choice = <b>WICKET!</b> ✅\n"
-            f"Different numbers = Bot scores runs ❌"
-        )
-    
-    bot.send_message(chat_id, msg, reply_markup=kb_batting_numbers())
+
+
+def safe_set_batting_order(chat_id: int, first_batting: str):
+    """Safely set batting order and start match"""
+    try:
+        g = safe_load_game(chat_id)
+        if not g:
+            logger.error(f"No game found for chat {chat_id}")
+            return
+        
+        g["state"] = "play"
+        g["batting"] = first_batting
+        g["is_powerplay"] = True
+        safe_save_game(chat_id, g)
+        
+        powerplay_overs = g.get('powerplay_overs', 0)
+        powerplay_text = f"⚡ <b>Powerplay active</b> (first {powerplay_overs} overs)" if powerplay_overs > 0 else ""
+        
+        if first_batting == "player":
+            msg = (
+                f"🏏 <b>You're batting first!</b>\n\n"
+                f"{powerplay_text}\n"
+                f"Send a number 1️⃣-6️⃣ to play each ball.\n"
+                f"Match the bot's number = <b>OUT!</b> ❌\n"
+                f"Different numbers = <b>RUNS!</b> ✅"
+            )
+        else:
+            msg = (
+                f"🎯 <b>Bot batting first! You're bowling.</b>\n\n"
+                f"{powerplay_text}\n"
+                f"Send a number 1️⃣-6️⃣ to bowl each ball.\n"
+                f"Match the bot's choice = <b>WICKET!</b> ✅\n"
+                f"Different numbers = Bot scores runs ❌"
+            )
+        
+        bot.send_message(chat_id, msg, reply_markup=kb_batting_numbers())
+        
+    except Exception as e:
+        logger.error(f"Error setting batting order: {e}")
+        bot.send_message(chat_id, "❌ Error starting match. Please try /play again.")
 
 def check_powerplay_status(g: Dict[str, Any]) -> bool:
     """Check if powerplay should end"""
@@ -832,7 +934,7 @@ def check_innings_end(g: Dict[str, Any]) -> bool:
 
 def process_ball(chat_id: int, user_value: int):
     """Enhanced ball processing with commentary and stats"""
-    g = load_game(chat_id)
+    g = safe_load_game(chat_id)
     if not g or g["state"] != "play":
         return
     
@@ -905,12 +1007,12 @@ def process_ball(chat_id: int, user_value: int):
     
     # Check if innings/match should end
     if check_innings_end(g):
-        save_game(chat_id, g)
+        safe_save_game(chat_id, g)
         end_innings_or_match(chat_id)
         return
     
     # Save game state and show current status
-    save_game(chat_id, g)
+    safe_save_game(chat_id, g)
     show_live_score(chat_id, g, detailed=False)
 
 def check_milestones(chat_id: int, g: Dict[str, Any]):
@@ -984,7 +1086,7 @@ def show_live_score(chat_id: int, g: Dict[str, Any], detailed: bool = True):
 
 def end_innings_or_match(chat_id: int):
     """Handle innings break or match completion"""
-    g = load_game(chat_id)
+    g = safe_load_game(chat_id)
     if not g:
         return
     
@@ -1030,7 +1132,7 @@ def start_second_innings(chat_id: int, g: Dict[str, Any]):
     g["overs_bowled"] = 0
     g["is_powerplay"] = True if g["powerplay_overs"] > 0 else False
     
-    save_game(chat_id, g)
+    safe_save_game(chat_id, g)
     bot.send_message(chat_id, first_innings_summary, reply_markup=kb_batting_numbers())
 
 def complete_match(chat_id: int, g: Dict[str, Any]):
@@ -1247,14 +1349,14 @@ def cmd_quick_play(message: types.Message):
     ensure_user(message)
     
     # Check if there's already an active game
-    existing_game = load_game(message.chat.id)
+    existing_game = safe_load_game(message.chat.id)
     if existing_game and existing_game["state"] in ["toss", "play"]:
         bot.send_message(message.chat.id, 
                         "⚠️ You have an active match! Use /forfeit to abandon it, or continue playing.",
                         reply_markup=kb_match_actions())
         return
     
-    start_new_game(message.chat.id, 2, 1, "medium", message.from_user.id)
+    safe_start_new_game(message.chat.id, 2, 1, "medium", message.from_user.id)
 
 @bot.message_handler(commands=["stats"])
 def cmd_stats(message: types.Message):
@@ -1274,7 +1376,7 @@ def cmd_achievements(message: types.Message):
 @bot.message_handler(commands=["score"])
 def cmd_live_score(message: types.Message):
     ensure_user(message)
-    g = load_game(message.chat.id)
+    g = safe_load_game(message.chat.id)
     if not g or g["state"] != "play":
         bot.send_message(message.chat.id, "❌ No active match found. Start one with /play")
         return
@@ -1283,7 +1385,7 @@ def cmd_live_score(message: types.Message):
 @bot.message_handler(commands=["forfeit"])
 def cmd_forfeit(message: types.Message):
     ensure_user(message)
-    g = load_game(message.chat.id)
+    g = safe_load_game(message.chat.id)
     if not g or g["state"] == "finished":
         bot.send_message(message.chat.id, "❌ No active match to forfeit.")
         return
@@ -1484,54 +1586,162 @@ def handle_callbacks(call: types.CallbackQuery):
         data = call.data
         chat_id = call.message.chat.id
         user_id = call.from_user.id
+        message_id = call.message.message_id
+        
+        logger.info(f"Callback received: {data} from user {user_id}")
         
         # Main menu navigation
         if data == "quick_play":
-            bot.answer_callback_query(call.id)
-            start_new_game(chat_id, 2, 1, "medium", user_id)
+            bot.answer_callback_query(call.id, "Starting quick match...")
+            try:
+                # Check for existing game first
+                existing_game = safe_load_game(chat_id)
+                if existing_game and existing_game.get("state") in ["toss", "play"]:
+                    bot.edit_message_text(
+                        "⚠️ You have an active match! Use 🏳️ Forfeit to abandon it, or continue playing.",
+                        chat_id, message_id, reply_markup=kb_match_actions()
+                    )
+                    return
+                
+                safe_start_new_game(chat_id, 2, 1, "medium", user_id)
+            except Exception as e:
+                logger.error(f"Error starting quick play: {e}")
+                bot.edit_message_text(
+                    "❌ Error starting match. Please try again.", 
+                    chat_id, message_id, reply_markup=kb_main_menu()
+                )
             
         elif data == "custom_match":
             bot.answer_callback_query(call.id)
-            bot.edit_message_text("🎮 Choose your match format:", chat_id, call.message.message_id,
-                                reply_markup=kb_format_select())
-            
+            try:
+                bot.edit_message_text(
+                    "🎮 <b>Custom Match</b>\n\nChoose your match format:", 
+                    chat_id, message_id, reply_markup=kb_format_select()
+                )
+            except Exception as e:
+                logger.error(f"Error showing custom match: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading custom match options")
+                
         elif data.startswith("format_"):
             bot.answer_callback_query(call.id)
-            if data == "format_random":
-                overs = random.randint(1, 10)
-                wickets = random.randint(1, 3)
-            else:
-                parts = data.split("_")
-                overs, wickets = int(parts[1]), int(parts[2])
-            
-            # Show difficulty selection
-            bot.edit_message_text(f"🎯 Format: T{overs} ({wickets} wickets)\nChoose difficulty:",
-                                chat_id, call.message.message_id, reply_markup=kb_difficulty_select())
-            # Store format in user session (simplified - you might want to use proper session storage)
-            
+            try:
+                if data == "format_random":
+                    overs = random.randint(1, 10)
+                    wickets = random.randint(1, 3)
+                    format_name = f"Random T{overs}"
+                else:
+                    parts = data.split("_")
+                    if len(parts) >= 3:
+                        overs, wickets = int(parts[1]), int(parts[2])
+                        format_name = f"T{overs}"
+                    else:
+                        # Fallback for malformed format
+                        overs, wickets = 2, 1
+                        format_name = "T2"
+                
+                # Store format in session
+                set_session_data(user_id, "selected_overs", overs)
+                set_session_data(user_id, "selected_wickets", wickets)
+                set_session_data(user_id, "format_name", format_name)
+                
+                # Show difficulty selection
+                bot.edit_message_text(
+                    f"🎯 <b>Format Selected:</b> {format_name} ({wickets} wicket{'s' if wickets > 1 else ''})\n\n"
+                    f"Choose difficulty level:",
+                    chat_id, message_id, reply_markup=kb_difficulty_select()
+                )
+            except Exception as e:
+                logger.error(f"Error handling format selection: {e}")
+                bot.edit_message_text(
+                    "❌ Error processing format selection. Please try again.",
+                    chat_id, message_id, reply_markup=kb_format_select()
+                )
+                
         elif data.startswith("diff_"):
             bot.answer_callback_query(call.id)
-            difficulty = data.split("_")[1]
-            # For demo, using default format - in real implementation, get from stored session
-            start_new_game(chat_id, 5, 2, difficulty, user_id)
-            
+            try:
+                difficulty = data.split("_")[1]
+                
+                # Get format from session
+                overs = get_session_data(user_id, "selected_overs", 2)
+                wickets = get_session_data(user_id, "selected_wickets", 1)
+                format_name = get_session_data(user_id, "format_name", "T2")
+                
+                # Validate difficulty
+                if difficulty not in DIFFICULTY_SETTINGS:
+                    difficulty = "medium"
+                
+                difficulty_desc = DIFFICULTY_SETTINGS[difficulty]["description"]
+                
+                bot.edit_message_text(
+                    f"✅ <b>Match Configuration:</b>\n"
+                    f"Format: {format_name} ({wickets} wicket{'s' if wickets > 1 else ''})\n"
+                    f"Difficulty: {difficulty.title()} - {difficulty_desc}\n\n"
+                    f"Starting match...",
+                    chat_id, message_id
+                )
+                
+                # Start the custom match
+                safe_start_new_game(chat_id, overs, wickets, difficulty, user_id)
+                
+                # Clear session data
+                session = get_user_session(user_id)
+                session.clear()
+                
+            except Exception as e:
+                logger.error(f"Error handling difficulty selection: {e}")
+                bot.edit_message_text(
+                    "❌ Error starting custom match. Please try again.",
+                    chat_id, message_id, reply_markup=kb_main_menu()
+                )
+        
+        elif data == "back_main" or data == "main_menu":
+            bot.answer_callback_query(call.id)
+            try:
+                bot.edit_message_text(
+                    "🏏 <b>Cricket Bot</b> - Main Menu\n\nSelect an option to continue:", 
+                    chat_id, message_id, reply_markup=kb_main_menu()
+                )
+                # Clear any session data
+                if user_id in user_sessions:
+                    user_sessions[user_id].clear()
+            except Exception as e:
+                logger.error(f"Error returning to main menu: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading main menu")
+                
         elif data == "my_stats":
             bot.answer_callback_query(call.id)
-            show_user_stats(chat_id, user_id)
-            
+            try:
+                show_user_stats(chat_id, user_id)
+            except Exception as e:
+                logger.error(f"Error showing stats: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading statistics")
+                
         elif data == "leaderboard":
             bot.answer_callback_query(call.id)
-            show_leaderboard(chat_id)
-            
+            try:
+                show_leaderboard(chat_id)
+            except Exception as e:
+                logger.error(f"Error showing leaderboard: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading leaderboard")
+                
         elif data.startswith("lb_"):
             bot.answer_callback_query(call.id)
-            category = data.split("_", 1)[1]
-            show_leaderboard(chat_id, category)
-            
+            try:
+                category = data.split("_", 1)[1]
+                show_leaderboard(chat_id, category)
+            except Exception as e:
+                logger.error(f"Error showing leaderboard category: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading leaderboard")
+                
         elif data == "achievements":
             bot.answer_callback_query(call.id)
-            show_achievements(chat_id, user_id)
-            
+            try:
+                show_achievements(chat_id, user_id)
+            except Exception as e:
+                logger.error(f"Error showing achievements: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading achievements")
+                
         # Toss handling
         elif data.startswith("toss_"):
             handle_toss(call)
@@ -1542,87 +1752,147 @@ def handle_callbacks(call: types.CallbackQuery):
         # Match actions
         elif data == "live_score":
             bot.answer_callback_query(call.id)
-            g = load_game(chat_id)
-            if g and g["state"] == "play":
-                show_live_score(chat_id, g, detailed=True)
+            try:
+                g = safe_load_game(chat_id)
+                if g and g.get("state") == "play":
+                    show_live_score(chat_id, g, detailed=True)
+                else:
+                    bot.answer_callback_query(call.id, "❌ No active match found")
+            except Exception as e:
+                logger.error(f"Error showing live score: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading score")
             
         elif data == "forfeit_confirm":
             bot.answer_callback_query(call.id, "Match forfeited!")
-            delete_game(chat_id)
-            bot.edit_message_text("🏳️ Match forfeited.", chat_id, call.message.message_id)
-            
+            try:
+                delete_game(chat_id)
+                bot.edit_message_text(
+                    "🏳️ <b>Match Forfeited</b>\n\nUse /play to start a new match.", 
+                    chat_id, message_id, reply_markup=kb_main_menu()
+                )
+            except Exception as e:
+                logger.error(f"Error forfeiting match: {e}")
+                
         elif data == "play_again":
-            bot.answer_callback_query(call.id)
-            start_new_game(chat_id, 2, 1, "medium", user_id)
+            bot.answer_callback_query(call.id, "Starting new match...")
+            try:
+                safe_start_new_game(chat_id, 2, 1, "medium", user_id)
+            except Exception as e:
+                logger.error(f"Error starting new match: {e}")
+                bot.answer_callback_query(call.id, "❌ Error starting new match")
+        
+        # Tournament and Challenges (placeholder)
+        elif data == "tournament":
+            bot.answer_callback_query(call.id, "🏆 Tournament feature coming soon!")
             
-        elif data == "main_menu":
+        elif data == "challenges":
+            bot.answer_callback_query(call.id, "🎯 Daily challenges coming soon!")
+            
+        elif data == "help":
             bot.answer_callback_query(call.id)
-            bot.edit_message_text("🏏 <b>Cricket Bot</b> - Main Menu", 
-                                chat_id, call.message.message_id, reply_markup=kb_main_menu())
+            try:
+                help_text = (
+                    f"🏏 <b>Cricket Bot Help</b>\n\n"
+                    f"<b>📖 How to Play:</b>\n"
+                    f"• Choose numbers 1-6 for each ball\n"
+                    f"• Same numbers = OUT! ❌\n"
+                    f"• Different numbers = RUNS! ✅\n\n"
+                    f"<b>🎮 Game Modes:</b>\n"
+                    f"• Quick Play - instant T2 match\n"
+                    f"• Custom Match - choose format & difficulty\n\n"
+                    f"<b>⚡ Commands:</b>\n"
+                    f"/play - Start quick match\n"
+                    f"/stats - Your statistics\n"
+                    f"/help - Show this help\n\n"
+                    f"<b>🎯 Pro Tips:</b>\n"
+                    f"• Use powerplay overs wisely\n"
+                    f"• Watch the required run rate\n"
+                    f"• Different difficulties change bot behavior"
+                )
+                bot.edit_message_text(help_text, chat_id, message_id, reply_markup=kb_main_menu())
+            except Exception as e:
+                logger.error(f"Error showing help: {e}")
+                bot.answer_callback_query(call.id, "❌ Error loading help")
         
         else:
-            bot.answer_callback_query(call.id, "Feature coming soon!")
+            logger.warning(f"Unknown callback data: {data}")
+            bot.answer_callback_query(call.id, "🚧 Feature coming soon!")
             
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         bot.answer_callback_query(call.id, "❌ Something went wrong!")
 
 def handle_toss(call: types.CallbackQuery):
+    """Handle toss with safe game operations"""
     chat_id = call.message.chat.id
-    g = load_game(chat_id)
+    message_id = call.message.message_id
     
-    if not g or g["state"] != "toss":
-        bot.answer_callback_query(call.id, "❌ Invalid game state")
-        return
-    
-    user_choice = call.data.split("_")[1]  # heads or tails
-    coin_result = random.choice(["heads", "tails"])
-    won_toss = (user_choice == coin_result)
-    
-    if won_toss:
-        toss_text = (
-            f"🪙 <b>Toss Result:</b> {coin_result.title()}\n"
-            f"🎉 <b>You won the toss!</b>\n\n"
-            f"Choose what you want to do:"
-        )
-        markup = kb_bat_bowl_choice()
-    else:
-        # Bot chooses (randomly for now, could be strategic)
-        bot_choice = random.choice(["bat", "bowl"])
-        toss_text = (
-            f"🪙 <b>Toss Result:</b> {coin_result.title()}\n"
-            f"😔 <b>You lost the toss.</b>\n\n"
-            f"🤖 Bot chose to <b>{bot_choice} first</b>."
-        )
-        markup = None
+    try:
+        g = safe_load_game(chat_id)
         
-        # Set batting order immediately
-        first_batting = "bot" if bot_choice == "bat" else "player"
-        set_batting_order(chat_id, first_batting)
-    
-    bot.edit_message_text(toss_text, chat_id, call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+        if not g or g.get("state") != "toss":
+            bot.answer_callback_query(call.id, "❌ Invalid game state")
+            return
+        
+        user_choice = call.data.split("_")[1]  # heads or tails
+        coin_result = random.choice(["heads", "tails"])
+        won_toss = (user_choice == coin_result)
+        
+        if won_toss:
+            toss_text = (
+                f"🪙 <b>Toss Result:</b> {coin_result.title()}\n"
+                f"🎉 <b>You won the toss!</b>\n\n"
+                f"Choose what you want to do:"
+            )
+            markup = kb_bat_bowl_choice()
+        else:
+            # Bot chooses (randomly for now, could be strategic)
+            bot_choice = random.choice(["bat", "bowl"])
+            toss_text = (
+                f"🪙 <b>Toss Result:</b> {coin_result.title()}\n"
+                f"😔 <b>You lost the toss.</b>\n\n"
+                f"🤖 Bot chose to <b>{bot_choice} first</b>."
+            )
+            markup = None
+            
+            # Set batting order immediately
+            first_batting = "bot" if bot_choice == "bat" else "player"
+            safe_set_batting_order(chat_id, first_batting)
+        
+        bot.edit_message_text(toss_text, chat_id, message_id, reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Error handling toss: {e}")
+        bot.answer_callback_query(call.id, "❌ Error processing toss")
 
 def handle_batting_choice(call: types.CallbackQuery):
+    """Handle batting choice with safe operations"""
     chat_id = call.message.chat.id
-    choice = call.data.split("_")[1]  # bat or bowl
+    message_id = call.message.message_id
     
-    first_batting = "player" if choice == "bat" else "bot"
-    
-    choice_text = (
-        f"✅ <b>You chose to {choice} first!</b>\n\n"
-        f"{'🏏 Get ready to bat!' if choice == 'bat' else '🎯 Get ready to bowl!'}"
-    )
-    
-    bot.edit_message_text(choice_text, chat_id, call.message.message_id)
-    bot.answer_callback_query(call.id)
-    
-    # Start the match
-    set_batting_order(chat_id, first_batting)
+    try:
+        choice = call.data.split("_")[1]  # bat or bowl
+        
+        first_batting = "player" if choice == "bat" else "bot"
+        
+        choice_text = (
+            f"✅ <b>You chose to {choice} first!</b>\n\n"
+            f"{'🏏 Get ready to bat!' if choice == 'bat' else '🎯 Get ready to bowl!'}\n\n"
+            f"Starting match..."
+        )
+        
+        bot.edit_message_text(choice_text, chat_id, message_id)
+        bot.answer_callback_query(call.id)
+        
+        # Start the match
+        safe_set_batting_order(chat_id, first_batting)
+        
+    except Exception as e:
+        logger.error(f"Error handling batting choice: {e}")
+        bot.answer_callback_query(call.id, "❌ Error processing choice")
 
-# ======================================================
-# Text Message Handler
-# ======================================================
+
 
 @bot.message_handler(content_types=["text"])
 def handle_text_messages(message: types.Message):
@@ -1655,14 +1925,14 @@ def handle_text_messages(message: types.Message):
         text_lower = text.lower()
         
         if text_lower in ["score", "📊 score"]:
-            g = load_game(message.chat.id)
+            g = safe_load_game(message.chat.id)
             if g and g["state"] == "play":
                 show_live_score(message.chat.id, g)
             else:
                 bot.reply_to(message, "❌ No active match. Start one with /play")
         
         elif text_lower in ["forfeit", "🏳️ forfeit", "quit"]:
-            g = load_game(message.chat.id)
+            g = safe_load_game(message.chat.id)
             if g:
                 delete_game(message.chat.id)
                 bot.reply_to(message, "🏳️ Match forfeited. Use /play for a new match.")

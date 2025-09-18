@@ -256,8 +256,11 @@ def kb_toss_choice() -> types.InlineKeyboardMarkup:
 
 def kb_bat_numbers() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3, one_time_keyboard=False)
-    for n in [1, 2, 3, 4, 5, 6]:
-        kb.insert(types.KeyboardButton(str(n)))
+    # Create rows of buttons
+    row1 = [types.KeyboardButton("1"), types.KeyboardButton("2"), types.KeyboardButton("3")]
+    row2 = [types.KeyboardButton("4"), types.KeyboardButton("5"), types.KeyboardButton("6")]
+    kb.add(*row1)
+    kb.add(*row2)
     return kb
 
 

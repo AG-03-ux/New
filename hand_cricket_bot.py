@@ -2,7 +2,7 @@ import os
 import logging
 import random
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Optional, Dict, Any
 
@@ -149,7 +149,7 @@ def upsert_user(u: types.User):
                 first_name=excluded.first_name,
                 last_name=excluded.last_name
             """,
-            (u.id, u.username, u.first_name, u.last_name, datetime.utcnow().isoformat()),
+            (u.id, u.username, u.first_name, u.last_name, datetime.now(timezone.utc).isoformat()),
         )
         db.execute(
             """
@@ -164,7 +164,7 @@ def log_event(chat_id: int, event: str, meta: str = ""):
     with db_conn() as db:
         db.execute(
             "INSERT INTO history (chat_id, event, meta, created_at) VALUES (?, ?, ?, ?)",
-            (chat_id, event, meta, datetime.utcnow().isoformat()),
+            (chat_id, event, meta, datetime.now(timezone.utc).isoformat()),
         )
 
 
@@ -188,8 +188,8 @@ def default_game(overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS) -> 
         target=None,
         overs_limit=overs,
         wickets_limit=wickets,
-        created_at=datetime.utcnow().isoformat(),
-        updated_at=datetime.utcnow().isoformat(),
+        created_at=datetime.now(timezone.utc).isoformat(),
+        updated_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
@@ -224,7 +224,7 @@ def save_game(chat_id: int, g: Dict[str, Any]):
                 g["player_wkts"], g["bot_wkts"],
                 g["balls_in_over"], g["overs_bowled"], g["target"],
                 g["overs_limit"], g["wickets_limit"],
-                g["created_at"], datetime.utcnow().isoformat(),
+                g["created_at"], datetime.now(timezone.utc).isoformat(),
             ),
         )
 

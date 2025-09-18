@@ -53,30 +53,7 @@ ASSETS = {
     "tie": "assets/tie.gif",
 }
 
-# Optional remote GIF URLs (override local assets if provided)
-SIX_GIF_URL = os.getenv("SIX_GIF_URL")
-WICKET_GIF_URL = os.getenv("WICKET_GIF_URL")
-WIN_GIF_URL = os.getenv("WIN_GIF_URL")
-LOSE_GIF_URL = os.getenv("LOSE_GIF_URL")
-TIE_GIF_URL = os.getenv("TIE_GIF_URL")
-GIF_URLS = {
-    "six": SIX_GIF_URL,
-    "wicket": WICKET_GIF_URL,
-    "win": WIN_GIF_URL,
-    "lose": LOSE_GIF_URL,
-    "tie": TIE_GIF_URL,
-}
-
 def _send_animation(chat_id, key: str):
-    # Prefer remote URL if provided; otherwise fallback to local asset file
-    url = GIF_URLS.get(key)
-    if url:
-        try:
-            bot.send_animation(chat_id, url)
-            return
-        except Exception as e:
-            logger.warning(f"Failed to send remote GIF '{key}' from {url}: {e}")
-
     path = ASSETS.get(key)
     if not path:
         return
@@ -84,7 +61,7 @@ def _send_animation(chat_id, key: str):
         with open(path, "rb") as f:
             bot.send_animation(chat_id, f)
     except Exception as e:
-        logger.warning(f"Failed to send local GIF {path}: {e}")
+        logger.warning(f"Failed to send GIF {path}: {e}")
 
 # ======================================================
 # Persistence (SQLite)
@@ -174,8 +151,13 @@ def upsert_user(u: types.User):
             """,
             (u.id, u.username, u.first_name, u.last_name, datetime.utcnow().isoformat()),
         )
-        # Ensure a stats row exists for this user (SQLite-compatible upsert)
-        db.execute("INSERT OR IGNORE INTO stats (user_id) VALUES (?)", (u.id,))
+        db.execute(
+            """
+            INSERT INTO stats (user_id) VALUES (?)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            (u.id,),
+        )
 
 
 def log_event(chat_id: int, event: str, meta: str = ""):
@@ -784,27 +766,10 @@ def on_text(message: types.Message):
 # ======================================================
 app = Flask(__name__)
 
-# Ensure webhook is set when running under WSGI servers (e.g., gunicorn on Render)
-if USE_WEBHOOK:
-    if not WEBHOOK_URL:
-        logger.error("USE_WEBHOOK=1 but WEBHOOK_URL is not set")
-    else:
-        try:
-            try:
-                bot.remove_webhook()
-            except Exception:
-                pass
-            full_url = WEBHOOK_URL.rstrip("/") + "/webhook"
-            ok = bot.set_webhook(url=full_url)
-            logger.info(f"Webhook set (WSGI init): {full_url} -> {ok}")
-        except Exception as e:
-            logger.exception(f"Failed to set webhook during WSGI init: {e}")
-
-# Webhook route (robust: always return 200 even on malformed payloads)
-@app.route("/webhook", methods=["POST", "GET"])  # GET allowed for health/debug
+# Existing webhook route
+@app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-<<<<<<< HEAD
         # Minimal logging to confirm reception (avoid logging secrets)
         data = request.stream.read().decode("utf-8")
         logger.info(f"Received Telegram update: {len(data)} bytes")
@@ -815,28 +780,6 @@ def webhook():
     except Exception as e:
         logger.exception(f"Error while processing webhook update: {e}")
         return "ERROR", 500
-=======
-        raw = request.get_data(as_text=True)
-        logger.info(f"Received Telegram update: {raw[:200]}...")
-        if request.method == "GET":
-            return "OK", 200
-        if not raw:
-            logger.warning("Empty webhook payload")
-            return "OK", 200
-        try:
-            update = telebot.types.Update.de_json(raw)
-        except Exception as parse_err:
-            logger.exception(f"Failed to parse Telegram update: {parse_err}")
-            return "OK", 200
-        try:
-            bot.process_new_updates([update])
-        except Exception as e:
-            logger.exception(f"Error while processing update: {e}")
-        return "OK", 200
-    except Exception as outer:
-        logger.exception(f"Webhook outer error: {outer}")
-        return "OK", 200
->>>>>>> d17a8faab76a29834fd78b46a5906e0b46651ff6
 
 # Root (stops Render 404 loops)
 @app.route("/", methods=["GET"])
@@ -855,7 +798,6 @@ def run_flask():
 
 
 def run_polling():
-<<<<<<< HEAD
     logger.info("Starting bot in polling mode...")
     try:
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
@@ -875,20 +817,6 @@ def run_polling():
 
 # def echo_all(message):
 #     bot.reply_to(message, f"You said: {message.text}")
-=======
-    # Ensure no webhook is active when using polling
-    try:
-        bot.remove_webhook()
-        logger.info("Removed existing webhook (if any) for polling mode.")
-    except Exception as e:
-        logger.warning(f"Could not remove webhook before polling: {e}")
-    # Skip old pending updates and use reasonable timeouts for stability
-    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
-
-
-# Note: Avoid catch-all handlers that intercept all messages, so the
-# game logic handlers above can work as intended.
->>>>>>> d17a8faab76a29834fd78b46a5906e0b46651ff6
 
 # ======================================================
 # Boot

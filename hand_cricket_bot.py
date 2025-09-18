@@ -1854,6 +1854,54 @@ def setup_bot():
     
     logger.info("Cricket Bot setup completed successfully!")
 
+
+def upsert_user(u: types.User):
+    with db_conn() as db:
+        now = datetime.now(timezone.utc).isoformat()
+        
+        try:
+            # Try the full insert first
+            db.execute("""
+                INSERT INTO users (
+                    user_id, username, first_name, last_name, language_code, 
+                    is_premium, created_at, last_active, total_messages
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username=excluded.username,
+                    first_name=excluded.first_name,
+                    last_name=excluded.last_name,
+                    language_code=excluded.language_code,
+                    is_premium=excluded.is_premium,
+                    last_active=excluded.last_active,
+                    total_messages=total_messages + 1
+            """, (u.id, u.username, u.first_name, u.last_name, 
+                  u.language_code, getattr(u, 'is_premium', False), now, now))
+                  
+        except sqlite3.OperationalError as e:
+            if "no column named" in str(e):
+                # Fallback to basic user insert for old schema
+                logger.warning(f"Using basic user upsert due to schema mismatch: {e}")
+                db.execute("""
+                    INSERT INTO users (user_id, username, first_name, last_name)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        username=excluded.username,
+                        first_name=excluded.first_name,
+                        last_name=excluded.last_name
+                """, (u.id, u.username, u.first_name, u.last_name))
+            else:
+                raise
+        
+        try:
+            db.execute("""
+                INSERT INTO stats (user_id, created_at, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at
+            """, (u.id, now, now))
+        except sqlite3.OperationalError:
+            db.execute("INSERT OR IGNORE INTO stats (user_id) VALUES (?)", (u.id,))
+
+
+            
 def main():
     """Main application entry point"""
     setup_bot()

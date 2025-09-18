@@ -17,8 +17,8 @@ load_dotenv()
 # Environment / Config
 # ======================================================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # required
-USE_WEBHOOK = int(os.getenv("USE_WEBHOOK", "0"))  # 1 for webhook, 0 for polling
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # e.g., https://yourdomain.onrender.com
+USE_WEBHOOK = int(os.getenv("USE_WEBHOOK", "1"))  # 1 for webhook on Render
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Set this in Render environment variables
 PORT = int(os.getenv("PORT", 5000))  # Render sets this automatically
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 DB_PATH = os.getenv("DB_PATH", "cricket_bot.db")
@@ -570,6 +570,7 @@ def ensure_user(message: types.Message):
 
 @bot.message_handler(commands=["start", "help"])  # start doubles as help
 def cmd_help(message: types.Message):
+    logger.info(f"Received /start or /help command from user {message.from_user.id}")
     ensure_user(message)
     text = (
         "👋 <b>Welcome to Cricket Bot!</b>\n\n"
@@ -587,15 +588,34 @@ def cmd_help(message: types.Message):
         "• /about — about this bot\n\n"
         "Tip: Use the on-screen keypad (1–6) for quick play."
     )
-    bot.reply_to(message, text, reply_markup=kb_bat_numbers())
+    try:
+        bot.reply_to(message, text, reply_markup=kb_bat_numbers())
+        logger.info(f"Successfully sent help message to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Failed to send help message: {e}")
 
 @bot.message_handler(commands=["about"])
 def cmd_about(message: types.Message):
+    logger.info(f"Received /about command from user {message.from_user.id}")
     ensure_user(message)
-    bot.reply_to(message, "🏏 <b>Cricket Bot</b> — fast, fun, and open-source friendly.\nMade with ❤️ using Python, Flask and PyTelegramBotAPI.")
+    try:
+        bot.reply_to(message, "🏏 <b>Cricket Bot</b> — fast, fun, and open-source friendly.\nMade with ❤️ using Python, Flask and PyTelegramBotAPI.")
+        logger.info(f"Successfully sent about message to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Failed to send about message: {e}")
+
+@bot.message_handler(commands=["test"])
+def cmd_test(message: types.Message):
+    logger.info(f"Received /test command from user {message.from_user.id}")
+    try:
+        bot.reply_to(message, "✅ Bot is working! All systems operational.")
+        logger.info(f"Successfully sent test response to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Failed to send test message: {e}")
 
 @bot.message_handler(commands=["play"])
 def cmd_play(message: types.Message):
+    logger.info(f"Received /play command from user {message.from_user.id}")
     ensure_user(message)
     parts = (message.text or "").split()
     overs, wkts = DEFAULT_OVERS, DEFAULT_WICKETS
@@ -609,10 +629,15 @@ def cmd_play(message: types.Message):
             wkts = int(parts[2])
         except Exception:
             pass
-    start_new_game(message.chat.id, overs, wkts)
+    try:
+        start_new_game(message.chat.id, overs, wkts)
+        logger.info(f"Successfully started new game for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Failed to start new game: {e}")
 
 @bot.message_handler(commands=["format"])  # set default format for this chat's next /play
 def cmd_format(message: types.Message):
+    logger.info(f"Received /format command from user {message.from_user.id}")
     ensure_user(message)
     parts = (message.text or "").split()
     if len(parts) < 3:
@@ -629,6 +654,7 @@ def cmd_format(message: types.Message):
 
 @bot.message_handler(commands=["score"])
 def cmd_score(message: types.Message):
+    logger.info(f"Received /score command from user {message.from_user.id}")
     ensure_user(message)
     g = load_game(message.chat.id)
     if not g or g["state"] == "finished":
@@ -644,16 +670,19 @@ def cmd_score(message: types.Message):
 
 @bot.message_handler(commands=["stats"])
 def cmd_stats(message: types.Message):
+    logger.info(f"Received /stats command from user {message.from_user.id}")
     ensure_user(message)
     bot.reply_to(message, get_stats_text(message.from_user.id))
 
 @bot.message_handler(commands=["leaderboard"])
 def cmd_leaderboard(message: types.Message):
+    logger.info(f"Received /leaderboard command from user {message.from_user.id}")
     ensure_user(message)
     bot.reply_to(message, get_leaderboard())
 
 @bot.message_handler(commands=["forfeit"])
 def cmd_forfeit(message: types.Message):
+    logger.info(f"Received /forfeit command from user {message.from_user.id}")
     ensure_user(message)
     g = load_game(message.chat.id)
     if not g:
@@ -669,6 +698,7 @@ def cmd_forfeit(message: types.Message):
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("toss_"))
 def cq_toss(call: types.CallbackQuery):
+    logger.info(f"Received toss callback from user {call.from_user.id}: {call.data}")
     g = load_game(call.message.chat.id)
     if not g:
         bot.answer_callback_query(call.id, "Start a match first with /play")
@@ -694,6 +724,7 @@ def cq_toss(call: types.CallbackQuery):
 
 @bot.callback_query_handler(func=lambda c: c.data in ("choose_bat", "choose_bowl"))
 def cq_choose(call: types.CallbackQuery):
+    logger.info(f"Received bat/bowl choice callback from user {call.from_user.id}: {call.data}")
     g = load_game(call.message.chat.id)
     if not g or (g["state"] not in ("play", "toss")):
         bot.answer_callback_query(call.id)
@@ -709,6 +740,7 @@ def cq_choose(call: types.CallbackQuery):
 
 @bot.message_handler(content_types=["text"])
 def on_text(message: types.Message):
+    logger.info(f"Received text message from user {message.from_user.id}: '{message.text}'")
     ensure_user(message)
     text = (message.text or "").strip()
 
@@ -716,13 +748,17 @@ def on_text(message: types.Message):
     if text.isdigit():
         n = int(text)
         if 1 <= n <= 6:
+            logger.info(f"Processing game input {n} from user {message.from_user.id}")
             # Remember who to credit stats to when the match finishes
             # We'll store the user id in history
             log_event(message.chat.id, "ball_input", f"from={message.from_user.id} n={n}")
             progress_ball(message.chat.id, n)
             return
 
-    # ignore other texts to avoid noise
+    # For debugging - respond to any other text
+    logger.info(f"Received non-numeric text: {text}")
+    if text.lower() in ['hello', 'hi', 'test']:
+        bot.reply_to(message, "✅ Bot is responding! Use /start to see available commands.")
 
 
 # ======================================================
@@ -733,15 +769,17 @@ app = Flask(__name__)
 # Existing webhook route
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # Minimal logging to confirm reception (avoid logging secrets)
-    data = request.stream.read().decode("utf-8")
-    logger.info(f"Received Telegram update: {data[:200]}...")  # log first 200 chars
-    update = telebot.types.Update.de_json(data)
     try:
+        # Minimal logging to confirm reception (avoid logging secrets)
+        data = request.stream.read().decode("utf-8")
+        logger.info(f"Received Telegram update: {len(data)} bytes")
+        update = telebot.types.Update.de_json(data)
+        logger.info(f"Processing update type: {update.content_type if hasattr(update, 'content_type') else 'unknown'}")
         bot.process_new_updates([update])
+        return "OK", 200
     except Exception as e:
-        logger.exception(f"Error while processing update: {e}")
-    return "OK", 200
+        logger.exception(f"Error while processing webhook update: {e}")
+        return "ERROR", 500
 
 # Root (stops Render 404 loops)
 @app.route("/", methods=["GET"])
@@ -755,40 +793,75 @@ def health():
 
 
 def run_flask():
+    logger.info(f"Starting Flask server on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
 
 
 def run_polling():
-    bot.infinity_polling()
-
-
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    print("[DEBUG] Inside handle_all_messages")
-    logging.info(f"[DEBUG] Got message: {message.text}")
+    logger.info("Starting bot in polling mode...")
     try:
-        bot.reply_to(message, "✅ Bot is alive and responding!")
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
-        logging.error(f"[ERROR] Failed to reply: {e}")
-def echo_all(message):
-    bot.reply_to(message, f"You said: {message.text}")
+        logger.exception(f"Error in polling: {e}")
+
+
+# Remove the problematic duplicate handlers
+# @bot.message_handler(func=lambda message: True)
+# def handle_all_messages(message):
+#     print("[DEBUG] Inside handle_all_messages")
+#     logging.info(f"[DEBUG] Got message: {message.text}")
+#     try:
+#         bot.reply_to(message, "✅ Bot is alive and responding!")
+#     except Exception as e:
+#         logging.error(f"[ERROR] Failed to reply: {e}")
+
+# def echo_all(message):
+#     bot.reply_to(message, f"You said: {message.text}")
 
 # ======================================================
 # Boot
 # ======================================================
 if __name__ == "__main__":
-    db_init()
+    logger.info("Initializing Cricket Bot...")
+    
+    try:
+        db_init()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.exception(f"Database initialization failed: {e}")
+        raise
+
+    # Test bot connection
+    try:
+        bot_info = bot.get_me()
+        logger.info(f"Bot connected successfully: @{bot_info.username} (ID: {bot_info.id})")
+    except Exception as e:
+        logger.exception(f"Failed to connect to Telegram API: {e}")
+        raise
+
     if USE_WEBHOOK:
         if not WEBHOOK_URL:
             raise ValueError("USE_WEBHOOK=1 but WEBHOOK_URL is not set")
         try:
+            # Remove any existing webhook first
             bot.remove_webhook()
-        except Exception:
-            pass
+            logger.info("Removed existing webhook")
+        except Exception as e:
+            logger.warning(f"Failed to remove existing webhook: {e}")
+        
+        # Set new webhook
         full_url = WEBHOOK_URL.rstrip("/") + "/webhook"
-        ok = bot.set_webhook(url=full_url)
-        logger.info(f"Webhook set: {full_url} -> {ok}")
+        try:
+            ok = bot.set_webhook(url=full_url)
+            logger.info(f"Webhook set: {full_url} -> {ok}")
+            if not ok:
+                logger.error("Failed to set webhook")
+                raise RuntimeError("Webhook setup failed")
+        except Exception as e:
+            logger.exception(f"Webhook setup error: {e}")
+            raise
+        
         run_flask()
     else:
-        logger.info("Starting polling mode…")
+        logger.info("Starting polling mode...")
         run_polling()

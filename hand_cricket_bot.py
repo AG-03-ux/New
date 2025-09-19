@@ -1692,6 +1692,14 @@ def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
 # Flask app for webhook mode
 app = Flask(__name__)
 
+
+
+@app.route('/')
+def index():
+    # You can return a simple message to confirm the app is running
+    return "<h1>Cricket Bot is alive!</h1><p>Webhook is ready for Telegram updates.</p>", 200
+
+
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':

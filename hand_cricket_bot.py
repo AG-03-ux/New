@@ -375,10 +375,27 @@ def init_tournament_db():
                 )
             """)
             
+            # Add missing tournament_rankings table
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS tournament_rankings (
+                    tournament_id INTEGER,
+                    user_id INTEGER,
+                    final_position INTEGER,
+                    rounds_survived INTEGER,
+                    total_runs INTEGER,
+                    total_wickets INTEGER,
+                    tournament_points INTEGER,
+                    prize_won INTEGER,
+                    title_earned TEXT,
+                    PRIMARY KEY (tournament_id, user_id)
+                )
+            """)
+            
             logger.info("Tournament database tables initialized")
             
         except Exception as e:
             logger.error(f"Error initializing tournament database: {e}")
+
 
 def log_event(chat_id: int, event: str, meta: str = ""):
     """Log events safely"""
@@ -759,7 +776,7 @@ def show_live_score(chat_id: int, g: Dict[str, Any], detailed: bool = True):
             else:
                 score_text += f"\n🤖 Boundaries: {g['bot_fours']}×4️⃣ {g['bot_sixes']}×6️⃣"
         
-        bot.send_message(chat_id, score_text)
+        bot.send_message(chat_id, score_text, reply_markup=kb_match_actions())
     except Exception as e:
         logger.error(f"Error showing live score: {e}")
 
@@ -1279,24 +1296,12 @@ def cmd_start(message: types.Message):
         bot.send_message(message.chat.id, "Welcome to Cricket Bot! Use /help for assistance.")
 
 @bot.message_handler(commands=["help"])  
+@bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):
     try:
         ensure_user(message)
         
         help_text = (
-            f"🏏 <b>Cricket Bot Help</b>\n\n"
-            f"<b>📖 How to Play:</b>\n"
-            f"• Choose numbers 1-6 for each ball\n"
-            f"• Same numbers = OUT! ❌\n"
-            f"• Different numbers = RUNS! ✅\n\n"
-            f"<b>🎮 Game Modes:</b>\n"
-            f"• Quick Play - instant T2 match\n"
-            f"• Custom Match - choose format & difficulty\n\n"
-            f"<b>⚡ Commands:</b>\n"
-            f"/play - Start quick match\n"
-            f"/stats - Your statistics  \n"
-            f"/leaderboard - Top players\n"
-            f"/help - Show this help\n\n"
             f"🏏 <b>Cricket Bot Help</b>\n\n"
             f"<b>📖 How to Play:</b>\n"
             f"• Choose numbers 1-6 for each ball\n"

@@ -10,12 +10,15 @@ import requests
 import threading
 import time
 import re
-
 from flask import Flask, request, jsonify
 import telebot
 from telebot import types
-
 from dotenv import load_dotenv
+from enum import Enum
+from collections import defaultdict
+import uuid
+
+
 load_dotenv()
 
 
@@ -50,6 +53,83 @@ MAX_OVERS = 20
 MAX_WICKETS = 10
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
 
+class TournamentStatus(Enum):
+    UPCOMING = "upcoming"
+    REGISTRATION = "registration"
+    ONGOING = "ongoing"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+TOURNAMENT_FORMATS = {
+    "blitz": {"overs": 1, "wickets": 1, "name": "⚡ Blitz T1", "entry_fee": 10},
+    "quick": {"overs": 2, "wickets": 1, "name": "🏃 Quick T2", "entry_fee": 20},
+    "classic": {"overs": 5, "wickets": 2, "name": "🏏 Classic T5", "entry_fee": 50},
+    "power": {"overs": 10, "wickets": 3, "name": "⚡ Power T10", "entry_fee": 100},
+    "premier": {"overs": 20, "wickets": 5, "name": "🏆 Premier T20", "entry_fee": 200}
+}
+
+ACHIEVEMENTS_LIST = [
+    {
+        "id": 1, "name": "First Victory", "description": "Win your first match",
+        "icon": "🏆", "points": 10, "requirement_type": "wins", "requirement_value": 1
+    },
+    {
+        "id": 2, "name": "Century Maker", "description": "Score 100 runs in a match",
+        "icon": "💯", "points": 50, "requirement_type": "high_score", "requirement_value": 100
+    },
+    {
+        "id": 3, "name": "Hat-trick Hero", "description": "Take 3 wickets in consecutive balls",
+        "icon": "🎩", "points": 75, "requirement_type": "hat_tricks", "requirement_value": 1
+    },
+    {
+        "id": 4, "name": "Consistent Player", "description": "Win 5 matches in a row",
+        "icon": "🔥", "points": 100, "requirement_type": "winning_streak", "requirement_value": 5
+    },
+    {
+        "id": 5, "name": "Big Hitter", "description": "Hit 50 sixes",
+        "icon": "🚀", "points": 25, "requirement_type": "sixes_hit", "requirement_value": 50
+    },
+    {
+        "id": 6, "name": "Boundary King", "description": "Hit 100 fours",
+        "icon": "⚡", "points": 30, "requirement_type": "fours_hit", "requirement_value": 100
+    },
+    {
+        "id": 7, "name": "Marathon Player", "description": "Play 100 matches",
+        "icon": "🏃", "points": 150, "requirement_type": "games_played", "requirement_value": 100
+    },
+    {
+        "id": 8, "name": "Perfect Game", "description": "Win without losing a wicket",
+        "icon": "👑", "points": 200, "requirement_type": "perfect_game", "requirement_value": 1
+    },
+    {
+        "id": 9, "name": "Speed Demon", "description": "Score 50 runs in under 20 balls",
+        "icon": "💨", "points": 60, "requirement_type": "fastest_50", "requirement_value": 20
+    },
+    {
+        "id": 10, "name": "Double Century", "description": "Score 200 runs in a match",
+        "icon": "🌟", "points": 100, "requirement_type": "high_score", "requirement_value": 200
+    },
+    {
+        "id": 11, "name": "Veteran Player", "description": "Play for 30 days",
+        "icon": "🎖️", "points": 75, "requirement_type": "days_played", "requirement_value": 30
+    },
+    {
+        "id": 12, "name": "Tournament Winner", "description": "Win your first tournament",
+        "icon": "🏅", "points": 300, "requirement_type": "tournaments_won", "requirement_value": 1
+    },
+    {
+        "id": 13, "name": "Serial Winner", "description": "Win 50 matches",
+        "icon": "👑", "points": 250, "requirement_type": "wins", "requirement_value": 50
+    },
+    {
+        "id": 14, "name": "Challenger", "description": "Participate in 10 tournaments",
+        "icon": "🎯", "points": 150, "requirement_type": "tournaments_played", "requirement_value": 10
+    },
+    {
+        "id": 15, "name": "Lucky Ducky", "description": "Get out for a duck 10 times",
+        "icon": "🦆", "points": 25, "requirement_type": "ducks", "requirement_value": 10
+    }
+]
 # ======================================================
 # Logging
 # ======================================================
@@ -117,6 +197,438 @@ CRICKET_EMOJIS = {
     "tie": "🤝"
 }
 
+
+# Add this constant after your existing TOURNAMENT_FORMATS (you already have this but make sure it's there)
+TOURNAMENT_REWARDS = {
+    "winner": {"coins": 1000, "trophy_points": 100, "title": "🏆 Champion"},
+    "runner_up": {"coins": 500, "trophy_points": 50, "title": "🥈 Runner-up"},
+    "semi_finalist": {"coins": 200, "trophy_points": 25, "title": "🥉 Semi-finalist"},
+    "quarter_finalist": {"coins": 100, "trophy_points": 10, "title": "🎖️ Quarter-finalist"}
+}
+
+# Add these missing functions (place them after your tournament management functions)
+
+def notify_tournament_round_start(tournament_id: int, round_number: int):
+    """Notify participants that a new round has started"""
+    with db_conn() as db:
+        try:
+            # Get tournament info
+            tournament = db.execute("SELECT name FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+            if not tournament:
+                return
+            
+            # Get active participants
+            participants = db.execute("""
+                SELECT user_id FROM tournament_participants 
+                WHERE tournament_id = ? AND is_eliminated = FALSE
+            """, (tournament_id,)).fetchall()
+            
+            tournament_name = tournament["name"]
+            message = f"🏆 {tournament_name} - Round {round_number} has started! Check your matches and get ready to play."
+            
+            for participant in participants:
+                try:
+                    bot.send_message(participant["user_id"], message)
+                except Exception as e:
+                    logger.warning(f"Failed to notify participant {participant['user_id']}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error notifying tournament round start: {e}")
+
+def update_tournament_stats(tournament_id: int):
+    """Update tournament statistics for all participants"""
+    with db_conn() as db:
+        try:
+            # Update tournaments_played for all participants
+            db.execute("""
+                UPDATE stats SET tournaments_played = tournaments_played + 1
+                WHERE user_id IN (
+                    SELECT user_id FROM tournament_participants WHERE tournament_id = ?
+                )
+            """, (tournament_id,))
+            
+            # Update tournaments_won for the winner
+            tournament = db.execute("SELECT winner_id FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+            if tournament and tournament["winner_id"]:
+                db.execute("""
+                    UPDATE stats SET tournaments_won = tournaments_won + 1
+                    WHERE user_id = ?
+                """, (tournament["winner_id"],))
+                
+            logger.info(f"Updated tournament stats for tournament {tournament_id}")
+            
+        except Exception as e:
+            logger.error(f"Error updating tournament stats: {e}")
+
+def handle_tournament_match_completion(chat_id: int, g: dict, winner_id: int, loser_id: int):
+    """Handle completion of a tournament match"""
+    try:
+        tournament_id = g.get("tournament_id")
+        if not tournament_id:
+            logger.warning("Tournament match completion called but no tournament_id found")
+            return
+        
+        round_number = g.get("tournament_round", 1)
+        
+        with db_conn() as db:
+            # Update match result in tournament_matches table
+            db.execute("""
+                UPDATE tournament_matches SET
+                    winner_id = ?,
+                    match_status = 'completed',
+                    completed_at = ?
+                WHERE tournament_id = ? AND round_number = ? 
+                AND ((player1_id = ? AND player2_id = ?) OR (player1_id = ? AND player2_id = ?))
+            """, (winner_id, datetime.now(timezone.utc).isoformat(), tournament_id, round_number,
+                  winner_id, loser_id, loser_id, winner_id))
+            
+            # Update participant elimination status
+            db.execute("""
+                UPDATE tournament_participants SET
+                    is_eliminated = TRUE,
+                    elimination_round = ?,
+                    eliminated_at = ?
+                WHERE tournament_id = ? AND user_id = ?
+            """, (round_number, datetime.now(timezone.utc).isoformat(), tournament_id, loser_id))
+            
+            # Check if round is complete and advance tournament
+            check_and_advance_tournament_round(tournament_id, round_number)
+            
+    except Exception as e:
+        logger.error(f"Error handling tournament match completion: {e}")
+
+def check_and_advance_tournament_round(tournament_id: int, current_round: int):
+    """Check if tournament round is complete and advance to next round"""
+    try:
+        with db_conn() as db:
+            # Count remaining matches in current round
+            pending_matches = db.execute("""
+                SELECT COUNT(*) as count FROM tournament_matches
+                WHERE tournament_id = ? AND round_number = ? AND match_status = 'pending'
+            """, (tournament_id, current_round)).fetchone()
+            
+            if pending_matches["count"] > 0:
+                logger.info(f"Tournament {tournament_id} round {current_round} still has {pending_matches['count']} pending matches")
+                return  # Round not complete yet
+            
+            # Get winners from current round
+            winners = db.execute("""
+                SELECT winner_id FROM tournament_matches
+                WHERE tournament_id = ? AND round_number = ? AND winner_id IS NOT NULL
+            """, (tournament_id, current_round)).fetchall()
+            
+            winner_ids = [w["winner_id"] for w in winners if w["winner_id"]]
+            
+            if len(winner_ids) <= 1:
+                # Tournament complete!
+                logger.info(f"Tournament {tournament_id} completed with winner: {winner_ids[0] if winner_ids else 'None'}")
+                complete_tournament(tournament_id, winner_ids[0] if winner_ids else None)
+            else:
+                # Create next round
+                logger.info(f"Advancing tournament {tournament_id} to round {current_round + 1}")
+                create_next_tournament_round(tournament_id, current_round + 1, winner_ids)
+                
+    except Exception as e:
+        logger.error(f"Error checking tournament round advancement: {e}")
+
+def complete_tournament(tournament_id: int, winner_id: int):
+    """Complete tournament and distribute prizes"""
+    try:
+        with db_conn() as db:
+            tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+            if not tournament:
+                return
+            
+            # Update tournament status
+            db.execute("""
+                UPDATE tournaments SET
+                    status = 'completed',
+                    winner_id = ?,
+                    end_date = ?
+                WHERE id = ?
+            """, (winner_id, datetime.now(timezone.utc).isoformat(), tournament_id))
+            
+            # Distribute prizes and titles
+            if tournament["prize_pool"] > 0:
+                distribute_tournament_rewards(tournament_id, tournament["prize_pool"])
+            
+            # Update participant stats
+            update_tournament_stats(tournament_id)
+            
+            # Send completion notifications
+            notify_tournament_completion(tournament_id)
+            
+            logger.info(f"Tournament {tournament_id} completed successfully")
+            
+    except Exception as e:
+        logger.error(f"Error completing tournament: {e}")
+
+def distribute_tournament_rewards(tournament_id: int, prize_pool: int):
+    """Distribute rewards to tournament participants"""
+    try:
+        with db_conn() as db:
+            # Get final rankings based on elimination rounds (later elimination = higher rank)
+            participants = db.execute("""
+                SELECT tp.user_id, tp.display_name, tp.elimination_round,
+                       CASE WHEN t.winner_id = tp.user_id THEN 0 ELSE tp.elimination_round END as sort_order
+                FROM tournament_participants tp
+                JOIN tournaments t ON tp.tournament_id = t.id
+                WHERE tp.tournament_id = ?
+                ORDER BY sort_order DESC, tp.total_runs DESC
+            """, (tournament_id,)).fetchall()
+            
+            if not participants:
+                return
+            
+            # Distribute prizes to top 4 finishers
+            total_prize = int(prize_pool)
+            
+            for i, participant in enumerate(participants[:4]):
+                position = i + 1
+                
+                # Calculate prize and title based on position
+                if position == 1:  # Winner
+                    prize = int(total_prize * 0.5)  # 50% to winner
+                    title = TOURNAMENT_REWARDS["winner"]["title"]
+                    trophy_points = TOURNAMENT_REWARDS["winner"]["trophy_points"]
+                elif position == 2:  # Runner-up
+                    prize = int(total_prize * 0.3)  # 30% to runner-up
+                    title = TOURNAMENT_REWARDS["runner_up"]["title"]
+                    trophy_points = TOURNAMENT_REWARDS["runner_up"]["trophy_points"]
+                elif position == 3:  # Third place
+                    prize = int(total_prize * 0.15)  # 15% to third
+                    title = TOURNAMENT_REWARDS["semi_finalist"]["title"]
+                    trophy_points = TOURNAMENT_REWARDS["semi_finalist"]["trophy_points"]
+                else:  # Fourth place
+                    prize = int(total_prize * 0.05)  # 5% to fourth
+                    title = TOURNAMENT_REWARDS["quarter_finalist"]["title"]
+                    trophy_points = TOURNAMENT_REWARDS["quarter_finalist"]["trophy_points"]
+                
+                # Give coins to user
+                db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", 
+                          (prize, participant["user_id"]))
+                
+                # Record ranking
+                db.execute("""
+                    INSERT OR REPLACE INTO tournament_rankings (
+                        tournament_id, user_id, final_position, 
+                        tournament_points, prize_won, title_earned
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (tournament_id, participant["user_id"], position, 
+                      trophy_points, prize, title))
+                
+                logger.info(f"Awarded {prize} coins to user {participant['user_id']} for position {position}")
+                
+    except Exception as e:
+        logger.error(f"Error distributing tournament rewards: {e}")
+
+def notify_tournament_completion(tournament_id: int):
+    """Send tournament completion notifications to all participants"""
+    try:
+        with db_conn() as db:
+            tournament = db.execute("SELECT name FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+            if not tournament:
+                return
+                
+            # Get top 3 finishers
+            rankings = db.execute("""
+                SELECT tr.final_position, tr.title_earned, tp.display_name
+                FROM tournament_rankings tr
+                JOIN tournament_participants tp ON tr.tournament_id = tp.tournament_id AND tr.user_id = tp.user_id
+                WHERE tr.tournament_id = ?
+                ORDER BY tr.final_position
+                LIMIT 3
+            """, (tournament_id,)).fetchall()
+            
+            completion_text = f"🏆 {tournament['name']} - COMPLETED!\n\n"
+            
+            if rankings:
+                for rank in rankings:
+                    position_emoji = "🥇" if rank["final_position"] == 1 else "🥈" if rank["final_position"] == 2 else "🥉"
+                    completion_text += f"{position_emoji} {rank['display_name']} - {rank['title_earned']}\n"
+            
+            completion_text += f"\nCongratulations to all participants!"
+            
+            # Send to all participants
+            participants = db.execute("""
+                SELECT user_id FROM tournament_participants WHERE tournament_id = ?
+            """, (tournament_id,)).fetchall()
+            
+            for participant in participants:
+                try:
+                    bot.send_message(participant["user_id"], completion_text)
+                except Exception as e:
+                    logger.warning(f"Could not notify user {participant['user_id']}: {e}")
+                    
+    except Exception as e:
+        logger.error(f"Error notifying tournament completion: {e}")
+
+def complete_tournament_match(chat_id: int, g: dict):
+    """Complete tournament match and handle results"""
+    try:
+        tournament_id = g.get("tournament_id")
+        if not tournament_id:
+            # Not a tournament match, handle as regular match
+            complete_match(chat_id, g)
+            return
+        
+        round_number = g.get("tournament_round", 1)
+        
+        # Determine winner
+        if g["player_score"] > g["bot_score"]:
+            winner_id = g.get("player_id")  # You'll need to ensure this is set when starting tournament matches
+            result = "win"
+            winner_name = "You"
+        elif g["bot_score"] > g["player_score"]:
+            winner_id = g.get("opponent_id", 0)  # Bot opponent
+            result = "loss"  
+            winner_name = "Bot"
+        else:
+            result = "tie"
+            winner_name = "Tie"
+            winner_id = None
+        
+        # Show match result
+        margin = abs(g["player_score"] - g["bot_score"])
+        margin_text = f"by {margin} runs" if result != "tie" else "Match Tied"
+        
+        tournament_match_summary = (
+            f"🏆 TOURNAMENT MATCH COMPLETE\n\n"
+            f"🏏 Your Score: {g['player_score']}/{g['player_wkts']}\n"
+            f"🤖 Bot Score: {g['bot_score']}/{g['bot_wkts']}\n\n"
+            f"🎯 Result: {winner_name} wins {margin_text}\n"
+            f"Tournament: Round {round_number}\n\n"
+            f"⏳ Waiting for other matches to complete..."
+        )
+        
+        bot.send_message(chat_id, tournament_match_summary)
+        
+        # Handle tournament progression
+        if winner_id:
+            # For bot matches, we need to simulate the opponent
+            opponent_id = g.get("opponent_id", 999999)  # Use a placeholder bot ID
+            loser_id = opponent_id if result == "win" else g.get("player_id")
+            if winner_id and loser_id:
+                handle_tournament_match_completion(chat_id, g, winner_id, loser_id)
+        
+        # Clean up game state
+        delete_game(chat_id)
+        
+    except Exception as e:
+        logger.error(f"Error completing tournament match: {e}")
+        # Fallback to regular match completion
+        complete_match(chat_id, g)
+
+# Add this function to safely check if tournament tables exist
+def tournament_tables_exist():
+    """Check if tournament tables exist in database"""
+    try:
+        with db_conn() as db:
+            cursor = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tournaments'")
+            result = cursor.fetchone()
+            return result is not None
+    except:
+        return False
+
+# Update your init_tournament_db to be safer
+def init_tournament_db():
+    """Initialize tournament-related database tables"""
+    with db_conn() as db:
+        try:
+            # Check if enhanced tournament table already exists
+            cursor = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tournaments'")
+            existing_table = cursor.fetchone()
+            
+            if existing_table:
+                # Table exists, add missing columns safely
+                try:
+                    db.execute("ALTER TABLE tournaments ADD COLUMN tournament_type TEXT DEFAULT 'knockout'")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    db.execute("ALTER TABLE tournaments ADD COLUMN current_participants INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    db.execute("ALTER TABLE tournaments ADD COLUMN difficulty_level TEXT DEFAULT 'medium'")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    db.execute("ALTER TABLE tournaments ADD COLUMN winner_id INTEGER")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    db.execute("ALTER TABLE tournaments ADD COLUMN current_round INTEGER DEFAULT 1")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    db.execute("ALTER TABLE tournaments ADD COLUMN total_rounds INTEGER")
+                except sqlite3.OperationalError:
+                    pass
+            
+            # Create additional tournament tables
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS tournament_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tournament_id INTEGER,
+                    round_number INTEGER,
+                    match_number INTEGER,
+                    player1_id INTEGER,
+                    player2_id INTEGER,
+                    player1_name TEXT,
+                    player2_name TEXT,
+                    winner_id INTEGER,
+                    player1_score INTEGER DEFAULT 0,
+                    player2_score INTEGER DEFAULT 0,
+                    player1_wickets INTEGER DEFAULT 0,
+                    player2_wickets INTEGER DEFAULT 0,
+                    match_status TEXT DEFAULT 'pending',
+                    match_data TEXT,
+                    scheduled_at TEXT,
+                    completed_at TEXT,
+                    created_at TEXT
+                )
+            """)
+            
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS tournament_rankings (
+                    tournament_id INTEGER,
+                    user_id INTEGER,
+                    final_position INTEGER,
+                    rounds_survived INTEGER,
+                    total_runs INTEGER,
+                    total_wickets INTEGER,
+                    tournament_points INTEGER,
+                    prize_won INTEGER,
+                    title_earned TEXT,
+                    PRIMARY KEY (tournament_id, user_id)
+                )
+            """)
+            
+            # Add coins column to users table safely
+            try:
+                db.execute("ALTER TABLE users ADD COLUMN coins INTEGER DEFAULT 100")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+                
+            # Add tournament stats columns safely
+            try:
+                db.execute("ALTER TABLE stats ADD COLUMN tournaments_played INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                db.execute("ALTER TABLE stats ADD COLUMN tournaments_won INTEGER DEFAULT 0") 
+            except sqlite3.OperationalError:
+                pass
+            try:
+                db.execute("ALTER TABLE stats ADD COLUMN tournament_points INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+                
+        except Exception as e:
+            logger.error(f"Error initializing tournament database: {e}")
+
+            
 def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
     """Send cricket-related animations with fallback to emojis"""
     try:
@@ -177,8 +689,15 @@ def db_init():
                 favorite_format TEXT DEFAULT '2,1'
             )
         """)
+        pass
+    
+    # Call tournament initialization AFTER basic tables are created
+    try:
+        init_tournament_db()
+    except Exception as e:
+        logger.error(f"Tournament DB init failed: {e}")
         
-        # Add this to your db_init() function
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -932,11 +1451,17 @@ def check_innings_end(g: Dict[str, Any]) -> bool:
     
     return False
 
-def process_ball(chat_id: int, user_value: int):
-    """Enhanced ball processing with commentary and stats"""
+def enhanced_process_ball(chat_id: int, user_value: int):
+    """Enhanced ball processing with tournament support"""
     g = safe_load_game(chat_id)
     if not g or g["state"] != "play":
         return
+    
+    # Check if this is a tournament match
+    is_tournament_match = g.get("tournament_id") is not None
+    
+    # Your existing process_ball logic here...
+    # (keeping the same logic but adding tournament handling at the end)
     
     if not (1 <= user_value <= 6):
         bot.send_message(chat_id, "❌ Please send a number between 1️⃣ and 6️⃣")
@@ -975,8 +1500,10 @@ def process_ball(chat_id: int, user_value: int):
             elif runs_scored == 6:
                 g["bot_sixes"] += 1
     
-    # Generate commentary
+    # Generate commentary with tournament context
     commentary = get_commentary(g, user_value, bot_value, runs_scored, is_wicket)
+    if is_tournament_match:
+        commentary += f" [Tournament Match - Round {g.get('tournament_round', 1)}]"
     
     # Send appropriate animation
     if is_wicket:
@@ -988,18 +1515,21 @@ def process_ball(chat_id: int, user_value: int):
     else:
         bot.send_message(chat_id, commentary)
     
-    # Check for over completion
+    # Tournament spectator notifications
+    if is_tournament_match:
+        notify_tournament_spectators(g.get("tournament_id"), chat_id, commentary)
+    
+    # Check for over completion and other game events
     over_completed = check_over_completion(g)
     powerplay_ended = check_powerplay_status(g)
     
-    # Additional messages for over completion
     if over_completed:
         over_summary = f"🏁 <b>Over {g['overs_bowled']} completed</b>"
         if powerplay_ended:
             over_summary += "\n⚡ <b>Powerplay ended</b>"
         bot.send_message(chat_id, over_summary)
     
-    # Check for milestone achievements
+    # Check milestones
     check_milestones(chat_id, g)
     
     # Save ball-by-ball data
@@ -1008,12 +1538,26 @@ def process_ball(chat_id: int, user_value: int):
     # Check if innings/match should end
     if check_innings_end(g):
         safe_save_game(chat_id, g)
-        end_innings_or_match(chat_id)
+        if is_tournament_match:
+            end_tournament_match(chat_id, g)
+        else:
+            end_innings_or_match(chat_id)
         return
     
     # Save game state and show current status
     safe_save_game(chat_id, g)
     show_live_score(chat_id, g, detailed=False)
+
+def end_tournament_match(chat_id: int, g: dict):
+    """Handle end of tournament match"""
+    if g["innings"] == 1:
+        # End of first innings in tournament match
+        start_second_innings(chat_id, g)
+    else:
+        # Tournament match complete
+        complete_tournament_match(chat_id, g)
+
+
 
 def check_milestones(chat_id: int, g: Dict[str, Any]):
     """Check and announce milestones"""
@@ -1532,49 +2076,1566 @@ def show_leaderboard(chat_id: int, category: str = "wins"):
         
         bot.send_message(chat_id, leaderboard_text, reply_markup=kb)
 
-def show_achievements(chat_id: int, user_id: int):
+def end_tournament_match(chat_id: int, g: dict):
+    """Handle end of tournament match"""
+    if g["innings"] == 1:
+        # End of first innings in tournament match
+        start_second_innings(chat_id, g)
+    else:
+        # Tournament match complete
+        complete_tournament_match(chat_id, g)
+
+def complete_tournament_match(chat_id: int, g: dict):
+    """Complete tournament match and handle results"""
+    tournament_id = g.get("tournament_id")
+    round_number = g.get("tournament_round", 1)
+    
+    # Determine winner
+    if g["player_score"] > g["bot_score"]:
+        winner_id = g.get("player_id")  # You'll need to store this
+        result = "win"
+        winner_name = "You"
+    elif g["bot_score"] > g["player_score"]:
+        winner_id = g.get("opponent_id")  # For bot, this would be None
+        result = "loss"  
+        winner_name = "Bot"
+    else:
+        result = "tie"
+        winner_name = "Tie"
+    
+    # Show match result
+    margin = abs(g["player_score"] - g["bot_score"])
+    margin_text = f"by {margin} runs" if result != "tie" else "Match Tied"
+    
+    tournament_match_summary = (
+        f"🏆 <b>TOURNAMENT MATCH COMPLETE</b>\n\n"
+        f"🏏 Your Score: {g['player_score']}/{g['player_wkts']}\n"
+        f"🤖 Bot Score: {g['bot_score']}/{g['bot_wkts']}\n\n"
+        f"🎯 <b>Result: {winner_name} wins {margin_text}</b>\n"
+        f"Tournament: Round {round_number}\n\n"
+        f"⏳ Waiting for other matches to complete..."
+    )
+    
+    bot.send_message(chat_id, tournament_match_summary)
+    
+    # Handle tournament progression
+    if tournament_id and winner_id:
+        handle_tournament_match_completion(chat_id, g, winner_id, g.get("opponent_id"))
+    
+    # Clean up game state
+    delete_game(chat_id)
+
+def notify_tournament_spectators(tournament_id: int, match_chat_id: int, event: str):
+    """Notify tournament spectators of match events"""
+    # This would send updates to users who are spectating the tournament
+    # Implementation would depend on how you track spectators
+    pass
+
+# Enhanced Tournament Dashboard
+def show_tournament_dashboard(chat_id: int):
+    """Show comprehensive tournament dashboard"""
+    with db_conn() as db:
+        # Get tournament statistics
+        stats = {
+            "total_tournaments": db.execute("SELECT COUNT(*) as count FROM tournaments").fetchone()["count"],
+            "active_tournaments": db.execute("SELECT COUNT(*) as count FROM tournaments WHERE status IN ('registration', 'ongoing')").fetchone()["count"],
+            "total_participants": db.execute("SELECT COUNT(DISTINCT user_id) as count FROM tournament_participants").fetchone()["count"],
+            "total_prize_distributed": db.execute("SELECT SUM(prize_won) as total FROM tournament_rankings WHERE prize_won > 0").fetchone()["total"] or 0
+        }
+        
+        # Upcoming tournaments
+        upcoming = db.execute("""
+            SELECT t.*, COUNT(tp.user_id) as participants
+            FROM tournaments t
+            LEFT JOIN tournament_participants tp ON t.id = tp.tournament_id
+            WHERE t.status = 'registration'
+            GROUP BY t.id
+            ORDER BY t.registration_deadline ASC
+            LIMIT 3
+        """).fetchall()
+        
+        dashboard_text = (
+            f"🏆 <b>Tournament Central Dashboard</b>\n\n"
+            f"📊 <b>Overall Statistics:</b>\n"
+            f"• Total Tournaments: {stats['total_tournaments']}\n"
+            f"• Active Tournaments: {stats['active_tournaments']}\n"
+            f"• Total Participants: {stats['total_participants']}\n"
+            f"• Prizes Distributed: {stats['total_prize_distributed']} coins\n\n"
+        )
+        
+        if upcoming:
+            dashboard_text += "🔥 <b>Hot Tournaments:</b>\n"
+            for tournament in upcoming:
+                format_info = TOURNAMENT_FORMATS.get(tournament["format"], TOURNAMENT_FORMATS["quick"])
+                spots_left = tournament["max_participants"] - tournament["participants"]
+                
+                dashboard_text += (
+                    f"• {tournament['name']}\n"
+                    f"  {format_info['name']} | {spots_left} spots left\n"
+                    f"  Entry: {tournament['entry_fee']} coins\n\n"
+                )
+        else:
+            dashboard_text += "📝 <b>No active tournaments - be the first to create one!</b>\n\n"
+        
+        dashboard_text += "🎯 <b>Quick Actions:</b>"
+        
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("⚡ Quick Join", callback_data="tournament_quick_join"),
+            types.InlineKeyboardButton("🏆 Create Tournament", callback_data="tournament_create")
+        )
+        kb.add(
+            types.InlineKeyboardButton("📊 My Stats", callback_data="tournament_my_stats"),
+            types.InlineKeyboardButton("🥇 Hall of Fame", callback_data="tournament_hall_of_fame")
+        )
+        kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+        
+        bot.send_message(chat_id, dashboard_text, reply_markup=kb)
+
+def show_tournament_hall_of_fame(chat_id: int):
+    """Display tournament hall of fame"""
+    with db_conn() as db:
+        # All-time tournament winners
+        champions = db.execute("""
+            SELECT u.first_name, u.username, t.name as tournament_name, 
+                   tr.prize_won, t.created_at
+            FROM tournament_rankings tr
+            JOIN users u ON tr.user_id = u.user_id
+            JOIN tournaments t ON tr.tournament_id = t.id
+            WHERE tr.final_position = 1
+            ORDER BY t.created_at DESC
+            LIMIT 10
+        """).fetchall()
+        
+        # Most successful players
+        legends = db.execute("""
+            SELECT u.first_name, u.username,
+                   COUNT(tr.tournament_id) as tournaments_won,
+                   SUM(tr.prize_won) as total_winnings,
+                   MAX(tr.prize_won) as biggest_win
+            FROM tournament_rankings tr
+            JOIN users u ON tr.user_id = u.user_id
+            WHERE tr.final_position = 1
+            GROUP BY tr.user_id
+            ORDER BY tournaments_won DESC, total_winnings DESC
+            LIMIT 5
+        """).fetchall()
+        
+        hall_of_fame_text = "🏛️ <b>Tournament Hall of Fame</b>\n\n"
+        
+        if legends:
+            hall_of_fame_text += "👑 <b>Legends:</b>\n"
+            for i, legend in enumerate(legends, 1):
+                name = legend["first_name"] or f"@{legend['username']}" if legend["username"] else "Anonymous"
+                medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+                hall_of_fame_text += (
+                    f"{medal} {name}\n"
+                    f"   🏆 {legend['tournaments_won']} championships\n"
+                    f"   💰 {legend['total_winnings']} coins won\n\n"
+                )
+        
+        if champions:
+            hall_of_fame_text += "🏆 <b>Recent Champions:</b>\n"
+            for champion in champions[:5]:
+                name = champion["first_name"] or f"@{champion['username']}" if champion["username"] else "Anonymous"
+                date = datetime.fromisoformat(champion["created_at"]).strftime("%b %d")
+                hall_of_fame_text += f"• {name} - {champion['tournament_name']} ({date})\n"
+        
+        if not champions and not legends:
+            hall_of_fame_text += "🎯 No champions yet - be the first to make history!"
+        
+        bot.send_message(chat_id, hall_of_fame_text)
+
+def quick_join_tournament(chat_id: int, user_id: int):
+    """Quick join the most suitable tournament"""
+    with db_conn() as db:
+        # Find best tournament for user
+        suitable_tournaments = db.execute("""
+            SELECT t.*, (t.max_participants - t.current_participants) as spots_left
+            FROM tournaments t
+            WHERE t.status = 'registration' 
+            AND t.current_participants < t.max_participants
+            AND t.id NOT IN (
+                SELECT tournament_id FROM tournament_participants WHERE user_id = ?
+            )
+            ORDER BY spots_left ASC, t.entry_fee ASC
+            LIMIT 1
+        """, (user_id,)).fetchone()
+        
+        if not suitable_tournaments:
+            bot.send_message(chat_id, 
+                           "❌ No suitable tournaments available.\n"
+                           "Try creating your own tournament!")
+            return
+        
+        tournament = suitable_tournaments
+        format_info = TOURNAMENT_FORMATS.get(tournament["format"], TOURNAMENT_FORMATS["quick"])
+        
+        quick_join_text = (
+            f"⚡ <b>Quick Join Recommendation</b>\n\n"
+            f"🏆 {tournament['name']}\n"
+            f"🎮 Format: {format_info['name']}\n"
+            f"💰 Entry Fee: {tournament['entry_fee']} coins\n"
+            f"👥 Players: {tournament['current_participants']}/{tournament['max_participants']}\n\n"
+            f"Join this tournament?"
+        )
+        
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(
+            f"🎯 Join Now ({tournament['entry_fee']} coins)",
+            callback_data=f"join_tournament_{tournament['id']}"
+        ))
+        kb.add(types.InlineKeyboardButton("🔍 Browse All", callback_data="tournament_join"))
+        
+        bot.send_message(chat_id, quick_join_text, reply_markup=kb)
+
+# Tournament Chat and Social Features
+def create_tournament_chat_group(tournament_id: int):
+    """Create a group chat for tournament participants"""
+    # This would integrate with Telegram's group creation API
+    # For now, we'll simulate with a broadcast system
+    pass
+
+def broadcast_tournament_update(tournament_id: int, message: str):
+    """Broadcast update to all tournament participants"""
+    with db_conn() as db:
+        participants = db.execute("""
+            SELECT user_id FROM tournament_participants WHERE tournament_id = ?
+        """, (tournament_id,)).fetchall()
+        
+        for participant in participants:
+            try:
+                bot.send_message(participant["user_id"], f"📢 Tournament Update: {message}")
+            except Exception as e:
+                logger.warning(f"Failed to notify participant {participant['user_id']}: {e}")
+
+# Tournament Betting/Prediction System (Virtual)
+def create_tournament_predictions(tournament_id: int):
+    """Allow users to predict tournament outcomes"""
+    with db_conn() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tournament_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tournament_id INTEGER,
+                predictor_id INTEGER,
+                predicted_winner_id INTEGER,
+                predicted_runner_up_id INTEGER,
+                prediction_points INTEGER DEFAULT 0,
+                reward_coins INTEGER DEFAULT 0,
+                created_at TEXT,
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id),
+                FOREIGN KEY (predictor_id) REFERENCES users (user_id),
+                FOREIGN KEY (predicted_winner_id) REFERENCES users (user_id),
+                FOREIGN KEY (predicted_runner_up_id) REFERENCES users (user_id)
+            )
+        """)
+
+# Advanced Tournament Analytics
+def generate_player_tournament_profile(user_id: int):
+    """Generate detailed tournament profile for a player"""
+    with db_conn() as db:
+        profile = {}
+        
+        # Basic tournament stats
+        basic_stats = db.execute("""
+            SELECT 
+                COUNT(tp.tournament_id) as tournaments_played,
+                COUNT(CASE WHEN tr.final_position = 1 THEN 1 END) as wins,
+                COUNT(CASE WHEN tr.final_position <= 2 THEN 1 END) as finals,
+                COUNT(CASE WHEN tr.final_position <= 4 THEN 1 END) as top_4,
+                AVG(CAST(tr.final_position AS REAL)) as avg_position,
+                SUM(tr.prize_won) as total_winnings
+            FROM tournament_participants tp
+            LEFT JOIN tournament_rankings tr ON tp.tournament_id = tr.tournament_id AND tp.user_id = tr.user_id
+            WHERE tp.user_id = ?
+        """, (user_id,)).fetchone()
+        
+        profile["basic_stats"] = dict(basic_stats) if basic_stats else {}
+        
+        # Format preferences
+        format_stats = db.execute("""
+            SELECT t.format, 
+                   COUNT(*) as played,
+                   COUNT(CASE WHEN tr.final_position = 1 THEN 1 END) as won
+            FROM tournament_participants tp
+            JOIN tournaments t ON tp.tournament_id = t.id
+            LEFT JOIN tournament_rankings tr ON tp.tournament_id = tr.tournament_id AND tp.user_id = tr.user_id
+            WHERE tp.user_id = ?
+            GROUP BY t.format
+        """, (user_id,)).fetchall()
+        
+        profile["format_stats"] = [dict(row) for row in format_stats]
+        
+        return profile
+
+# Tournament Replay System
+def save_tournament_replay(tournament_id: int):
+    """Save tournament replay data for later viewing"""
+    with db_conn() as db:
+        # Get all matches and create replay data
+        matches = db.execute("""
+            SELECT * FROM tournament_matches 
+            WHERE tournament_id = ? 
+            ORDER BY round_number, match_number
+        """, (tournament_id,)).fetchall()
+        
+        replay_data = {
+            "tournament_id": tournament_id,
+            "matches": [dict(match) for match in matches],
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Store replay data (could be in a separate table or file system)
+        db.execute("""
+            INSERT INTO tournament_replays (tournament_id, replay_data, created_at)
+            VALUES (?, ?, ?)
+        """, (tournament_id, json.dumps(replay_data), replay_data["created_at"]))
+
+# Complete the callback handler integration
+def complete_tournament_callback_handler():
+    """Additional tournament callback handlers"""
+    # Add these to your main callback handler function
+    
+    tournament_callbacks = {
+        "tournament_quick_join": lambda call: quick_join_tournament(call.message.chat.id, call.from_user.id),
+        "tournament_my_stats": lambda call: show_my_tournaments(call.message.chat.id, call.from_user.id),
+        "tournament_hall_of_fame": lambda call: show_tournament_hall_of_fame(call.message.chat.id),
+        "tournament_dashboard": lambda call: show_tournament_dashboard(call.message.chat.id),
+    }
+    
+    return tournament_callbacks
+
+# Final Integration Updates
+def update_main_process_ball():
+    """Replace your existing process_ball with enhanced_process_ball"""
+    # In your main code, replace:
+    # process_ball(message.chat.id, number)
+    # with:
+    # enhanced_process_ball(message.chat.id, number)
+    pass
+
+def update_callback_handler_with_tournaments():
+    """Integration instructions for callback handler"""
+    # Add this to your existing handle_callbacks function:
+    
+    additional_callbacks = """
+    # Add these cases to your existing elif chain in handle_callbacks:
+    
+    elif data == "tournament_quick_join":
+        bot.answer_callback_query(call.id)
+        quick_join_tournament(chat_id, user_id)
+    
+    elif data == "tournament_my_stats":
+        bot.answer_callback_query(call.id) 
+        show_my_tournaments(chat_id, user_id)
+    
+    elif data == "tournament_hall_of_fame":
+        bot.answer_callback_query(call.id)
+        show_tournament_hall_of_fame(chat_id)
+        
+    elif data == "tournament_dashboard":
+        bot.answer_callback_query(call.id)
+        show_tournament_dashboard(chat_id)
+    
+    elif data.startswith("tournament_details_"):
+        tournament_id = int(data.split("_")[-1])
+        bot.answer_callback_query(call.id)
+        show_tournament_details(chat_id, tournament_id)
+    
+    elif data.startswith("spectate_"):
+        parts = data.split("_")
+        tournament_id, match_id = int(parts[1]), int(parts[2])
+        bot.answer_callback_query(call.id, "🎥 Spectating match...")
+        # Implement spectator mode
+    """
+    
+    return additional_callbacks
+
+
+def migrate_existing_database():
+    """Migrate existing database safely"""
+    with db_conn() as db:
+        try:
+            # Try to add tournament columns to games table
+            columns_to_add = [
+                ("tournament_id", "INTEGER"),
+                ("tournament_round", "INTEGER"), 
+                ("opponent_id", "INTEGER"),
+                ("is_tournament_match", "BOOLEAN DEFAULT FALSE")
+            ]
+            
+            for col_name, col_type in columns_to_add:
+                try:
+                    db.execute(f"ALTER TABLE games ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                    
+        except Exception as e:
+            logger.error(f"Database migration error: {e}")
+
+def initialize_tournament_system():
+    """Initialize the complete tournament system"""
+    try:
+        init_tournament_db()
+        migrate_existing_database()
+        logger.info("Tournament system initialized successfully!")
+    except Exception as e:
+        logger.error(f"Failed to initialize tournament system: {e}")
+# Enhanced Achievement Checking
+def check_all_achievements(user_id: int, game_result: dict):
+    """Comprehensive achievement checking after each match"""
+    with db_conn() as db:
+        # Get current user stats
+        stats = db.execute("SELECT * FROM stats WHERE user_id = ?", (user_id,)).fetchone()
+        if not stats:
+            return
+        
+        # Check each achievement
+        for achievement in ACHIEVEMENTS_LIST:
+            # Skip if already unlocked
+            existing = db.execute("""
+                SELECT user_id FROM user_achievements 
+                WHERE user_id = ? AND achievement_id = ?
+            """, (user_id, achievement["id"])).fetchone()
+            
+            if existing:
+                continue
+            
+            # Check if requirement is met
+            current_value = stats.get(achievement["requirement_type"], 0)
+            
+            # Special cases for complex achievements
+            if achievement["requirement_type"] == "perfect_game":
+                if game_result.get("wickets_lost", 1) == 0 and game_result.get("result") == "win":
+                    award_achievement(user_id, achievement["id"])
+            elif achievement["requirement_type"] == "fastest_50":
+                if (game_result.get("runs_scored", 0) >= 50 and 
+                    game_result.get("balls_faced", 999) <= achievement["requirement_value"]):
+                    award_achievement(user_id, achievement["id"])
+            elif current_value >= achievement["requirement_value"]:
+                award_achievement(user_id, achievement["id"])
+
+# Database Migration for Existing Bots
+
+# Tournament Season System
+def create_tournament_season():
+    """Create seasonal tournament competitions"""
+    with db_conn() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tournament_seasons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                start_date TEXT,
+                end_date TEXT,
+                total_tournaments INTEGER DEFAULT 0,
+                total_participants INTEGER DEFAULT 0,
+                season_champion_id INTEGER,
+                season_points_system TEXT,
+                status TEXT DEFAULT 'upcoming',
+                created_at TEXT,
+                FOREIGN KEY (season_champion_id) REFERENCES users (user_id)
+            )
+        """)
+
+# Initialize everything
+
+
+# Add these new database functions
+def init_tournament_db():
+    """Initialize tournament-related database tables"""
+    with db_conn() as db:
+        # Enhanced tournaments table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tournaments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                format TEXT NOT NULL,
+                tournament_type TEXT DEFAULT 'knockout',
+                max_participants INTEGER DEFAULT 16,
+                current_participants INTEGER DEFAULT 0,
+                entry_fee INTEGER DEFAULT 0,
+                prize_pool INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'upcoming',
+                difficulty_level TEXT DEFAULT 'medium',
+                start_date TEXT,
+                end_date TEXT,
+                registration_deadline TEXT,
+                created_by INTEGER,
+                winner_id INTEGER,
+                runner_up_id INTEGER,
+                current_round INTEGER DEFAULT 1,
+                total_rounds INTEGER,
+                bracket_data TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                FOREIGN KEY (created_by) REFERENCES users (user_id),
+                FOREIGN KEY (winner_id) REFERENCES users (user_id),
+                FOREIGN KEY (runner_up_id) REFERENCES users (user_id)
+            )
+        """)
+        
+        # Tournament participants with enhanced tracking
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tournament_participants (
+                tournament_id INTEGER,
+                user_id INTEGER,
+                username TEXT,
+                display_name TEXT,
+                seed_number INTEGER,
+                current_round INTEGER DEFAULT 1,
+                is_eliminated BOOLEAN DEFAULT FALSE,
+                elimination_round INTEGER,
+                matches_played INTEGER DEFAULT 0,
+                matches_won INTEGER DEFAULT 0,
+                total_runs INTEGER DEFAULT 0,
+                total_wickets INTEGER DEFAULT 0,
+                joined_at TEXT,
+                eliminated_at TEXT,
+                PRIMARY KEY (tournament_id, user_id),
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
+        
+        # Tournament matches
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tournament_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tournament_id INTEGER,
+                round_number INTEGER,
+                match_number INTEGER,
+                player1_id INTEGER,
+                player2_id INTEGER,
+                player1_name TEXT,
+                player2_name TEXT,
+                winner_id INTEGER,
+                player1_score INTEGER DEFAULT 0,
+                player2_score INTEGER DEFAULT 0,
+                player1_wickets INTEGER DEFAULT 0,
+                player2_wickets INTEGER DEFAULT 0,
+                match_status TEXT DEFAULT 'pending',
+                match_data TEXT,
+                scheduled_at TEXT,
+                completed_at TEXT,
+                created_at TEXT,
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id),
+                FOREIGN KEY (player1_id) REFERENCES users (user_id),
+                FOREIGN KEY (player2_id) REFERENCES users (user_id),
+                FOREIGN KEY (winner_id) REFERENCES users (user_id)
+            )
+        """)
+        
+        # Tournament leaderboards and rankings
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS tournament_rankings (
+                tournament_id INTEGER,
+                user_id INTEGER,
+                final_position INTEGER,
+                rounds_survived INTEGER,
+                total_runs INTEGER,
+                total_wickets INTEGER,
+                tournament_points INTEGER,
+                prize_won INTEGER,
+                title_earned TEXT,
+                PRIMARY KEY (tournament_id, user_id),
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
+        
+        # Add user coins/currency system
+        db.execute("""
+            ALTER TABLE users ADD COLUMN coins INTEGER DEFAULT 100
+        """)
+        
+        # Add tournament stats to user stats
+        db.execute("""
+            ALTER TABLE stats ADD COLUMN tournaments_played INTEGER DEFAULT 0
+        """)
+        db.execute("""
+            ALTER TABLE stats ADD COLUMN tournaments_won INTEGER DEFAULT 0
+        """)
+        db.execute("""
+            ALTER TABLE stats ADD COLUMN tournament_points INTEGER DEFAULT 0
+        """)
+
+# Tournament Management Functions
+def create_tournament(creator_id: int, name: str, format_key: str, tournament_type: str = "knockout", max_participants: int = 16):
+    """Create a new tournament"""
+    with db_conn() as db:
+        format_info = TOURNAMENT_FORMATS.get(format_key, TOURNAMENT_FORMATS["quick"])
+        prize_pool = format_info["entry_fee"] * max_participants * 0.8  # 80% of entry fees as prize
+        
+        now = datetime.now(timezone.utc).isoformat()
+        registration_deadline = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        
+        # Calculate tournament rounds
+        total_rounds = 1
+        temp_participants = max_participants
+        while temp_participants > 1:
+            temp_participants = temp_participants // 2
+            total_rounds += 1
+        
+        cursor = db.execute("""
+            INSERT INTO tournaments (
+                name, format, tournament_type, max_participants, entry_fee, 
+                prize_pool, status, start_date, registration_deadline, 
+                created_by, total_rounds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            name, format_key, tournament_type, max_participants, format_info["entry_fee"],
+            int(prize_pool), "registration", now, registration_deadline, 
+            creator_id, total_rounds, now, now
+        ))
+        
+        return cursor.lastrowid
+
+def join_tournament(tournament_id: int, user_id: int, username: str, display_name: str):
+    """Join a tournament"""
+    with db_conn() as db:
+        # Check tournament status and availability
+        tournament = db.execute("""
+            SELECT * FROM tournaments WHERE id = ? AND status = 'registration'
+        """, (tournament_id,)).fetchone()
+        
+        if not tournament:
+            return {"success": False, "message": "Tournament not available for registration"}
+        
+        if tournament["current_participants"] >= tournament["max_participants"]:
+            return {"success": False, "message": "Tournament is full"}
+        
+        # Check if user already joined
+        existing = db.execute("""
+            SELECT user_id FROM tournament_participants 
+            WHERE tournament_id = ? AND user_id = ?
+        """, (tournament_id, user_id)).fetchone()
+        
+        if existing:
+            return {"success": False, "message": "You're already registered for this tournament"}
+        
+        # Check user's coins
+        user = db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if not user or user["coins"] < tournament["entry_fee"]:
+            return {"success": False, "message": f"Insufficient coins! Need {tournament['entry_fee']} coins"}
+        
+        # Deduct entry fee and join tournament
+        db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", 
+                  (tournament["entry_fee"], user_id))
+        
+        seed_number = tournament["current_participants"] + 1
+        
+        db.execute("""
+            INSERT INTO tournament_participants (
+                tournament_id, user_id, username, display_name, seed_number, joined_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (tournament_id, user_id, username, display_name, seed_number, 
+              datetime.now(timezone.utc).isoformat()))
+        
+        # Update tournament participant count
+        db.execute("""
+            UPDATE tournaments SET 
+                current_participants = current_participants + 1,
+                updated_at = ?
+            WHERE id = ?
+        """, (datetime.now(timezone.utc).isoformat(), tournament_id))
+        
+        return {"success": True, "message": "Successfully joined tournament!", "seed": seed_number}
+
+def start_tournament(tournament_id: int):
+    """Start a tournament and generate brackets"""
+    with db_conn() as db:
+        tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        
+        if not tournament or tournament["status"] != "registration":
+            return False
+        
+        participants = db.execute("""
+            SELECT * FROM tournament_participants 
+            WHERE tournament_id = ? 
+            ORDER BY seed_number
+        """, (tournament_id,)).fetchall()
+        
+        if len(participants) < 2:
+            return False
+        
+        # Generate first round matches
+        generate_tournament_matches(tournament_id, participants)
+        
+        # Update tournament status
+        db.execute("""
+            UPDATE tournaments SET 
+                status = 'ongoing',
+                start_date = ?,
+                updated_at = ?
+            WHERE id = ?
+        """, (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), tournament_id))
+        
+        return True
+
+def generate_tournament_matches(tournament_id: int, participants: list):
+    """Generate tournament bracket matches"""
+    with db_conn() as db:
+        # Create first round matches
+        round_number = 1
+        match_number = 1
+        
+        # Pair participants (1 vs last, 2 vs second-last, etc.)
+        participants_list = list(participants)
+        
+        for i in range(0, len(participants_list), 2):
+            if i + 1 < len(participants_list):
+                p1 = participants_list[i]
+                p2 = participants_list[i + 1]
+                
+                db.execute("""
+                    INSERT INTO tournament_matches (
+                        tournament_id, round_number, match_number,
+                        player1_id, player2_id, player1_name, player2_name,
+                        match_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    tournament_id, round_number, match_number,
+                    p1["user_id"], p2["user_id"], p1["display_name"], p2["display_name"],
+                    "pending", datetime.now(timezone.utc).isoformat()
+                ))
+                
+                match_number += 1
+
+# Tournament UI Functions
+def kb_tournament_main() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🏆 Join Tournament", callback_data="tournament_join"),
+        types.InlineKeyboardButton("🎯 Create Tournament", callback_data="tournament_create")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📊 My Tournaments", callback_data="tournament_my"),
+        types.InlineKeyboardButton("🏅 Tournament Rankings", callback_data="tournament_rankings")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📋 Active Tournaments", callback_data="tournament_active"),
+        types.InlineKeyboardButton("🏆 Past Winners", callback_data="tournament_winners")
+    )
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+    return kb
+
+def kb_tournament_formats() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for format_key, format_info in TOURNAMENT_FORMATS.items():
+        kb.add(types.InlineKeyboardButton(
+            f"{format_info['name']} - {format_info['entry_fee']} 🪙",
+            callback_data=f"tourney_format_{format_key}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament"))
+    return kb
+
+def kb_tournament_sizes() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    sizes = [4, 8, 16, 32]
+    for size in sizes:
+        kb.add(types.InlineKeyboardButton(
+            f"{size} Players", callback_data=f"tourney_size_{size}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_create"))
+    return kb
+
+def show_tournaments(chat_id: int, status: str = "all"):
+    """Display available tournaments"""
+    with db_conn() as db:
+        if status == "all":
+            tournaments = db.execute("""
+                SELECT t.*, u.first_name as creator_name 
+                FROM tournaments t
+                LEFT JOIN users u ON t.created_by = u.user_id
+                WHERE t.status IN ('registration', 'ongoing')
+                ORDER BY t.created_at DESC
+                LIMIT 10
+            """).fetchall()
+        else:
+            tournaments = db.execute("""
+                SELECT t.*, u.first_name as creator_name 
+                FROM tournaments t
+                LEFT JOIN users u ON t.created_by = u.user_id
+                WHERE t.status = ?
+                ORDER BY t.created_at DESC
+                LIMIT 10
+            """, (status,)).fetchall()
+        
+        if not tournaments:
+            bot.send_message(chat_id, 
+                           "🏆 <b>No Active Tournaments</b>\n\n"
+                           "Be the first to create one!")
+            return
+        
+        for tournament in tournaments:
+            format_info = TOURNAMENT_FORMATS.get(tournament["format"], TOURNAMENT_FORMATS["quick"])
+            
+            status_emoji = {
+                "registration": "📝",
+                "ongoing": "⚡",
+                "completed": "✅"
+            }.get(tournament["status"], "📋")
+            
+            tournament_text = (
+                f"{status_emoji} <b>{tournament['name']}</b>\n\n"
+                f"🎮 Format: {format_info['name']}\n"
+                f"👥 Players: {tournament['current_participants']}/{tournament['max_participants']}\n"
+                f"💰 Entry Fee: {tournament['entry_fee']} coins\n"
+                f"🏆 Prize Pool: {tournament['prize_pool']} coins\n"
+                f"📊 Status: {tournament['status'].title()}\n"
+                f"👤 Created by: {tournament['creator_name'] or 'Anonymous'}"
+            )
+            
+            # Add join button for registration tournaments
+            kb = types.InlineKeyboardMarkup()
+            if tournament["status"] == "registration":
+                kb.add(types.InlineKeyboardButton(
+                    f"🎯 Join Tournament ({tournament['entry_fee']} coins)",
+                    callback_data=f"join_tournament_{tournament['id']}"
+                ))
+            elif tournament["status"] == "ongoing":
+                kb.add(types.InlineKeyboardButton(
+                    "📊 View Bracket", 
+                    callback_data=f"tournament_bracket_{tournament['id']}"
+                ))
+            
+            kb.add(types.InlineKeyboardButton(
+                "📋 Tournament Details",
+                callback_data=f"tournament_details_{tournament['id']}"
+            ))
+            
+            bot.send_message(chat_id, tournament_text, reply_markup=kb)
+
+def show_tournament_bracket(chat_id: int, tournament_id: int):
+    """Display tournament bracket"""
+    with db_conn() as db:
+        tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        if not tournament:
+            bot.send_message(chat_id, "❌ Tournament not found")
+            return
+        
+        # Get current round matches
+        matches = db.execute("""
+            SELECT * FROM tournament_matches 
+            WHERE tournament_id = ? AND round_number = ?
+            ORDER BY match_number
+        """, (tournament_id, tournament["current_round"])).fetchall()
+        
+        bracket_text = f"🏆 <b>{tournament['name']} - Bracket</b>\n\n"
+        bracket_text += f"🎯 Current Round: {tournament['current_round']}/{tournament['total_rounds']}\n\n"
+        
+        for match in matches:
+            match_status = "vs" if match["match_status"] == "pending" else "✅"
+            winner_indicator = ""
+            
+            if match["winner_id"]:
+                if match["winner_id"] == match["player1_id"]:
+                    winner_indicator = " 🏆"
+                else:
+                    winner_indicator = " 🏆"
+            
+            bracket_text += (
+                f"🥊 <b>Match {match['match_number']}:</b>\n"
+                f"   {match['player1_name']}{' 🏆' if match['winner_id'] == match['player1_id'] else ''}\n"
+                f"   {match_status}\n"
+                f"   {match['player2_name']}{' 🏆' if match['winner_id'] == match['player2_id'] else ''}\n\n"
+            )
+        
+        bot.send_message(chat_id, bracket_text)
+
+# Enhanced Achievements System
+def show_achievements_enhanced(chat_id: int, user_id: int):
+    """Show all achievements with completion status"""
     with db_conn() as db:
         # Get user's unlocked achievements
-        cur = db.execute("""
-            SELECT a.name, a.description, a.icon, a.points, ua.unlocked_at
-            FROM achievements a
-            JOIN user_achievements ua ON a.id = ua.achievement_id  
-            WHERE ua.user_id = ?
-            ORDER BY ua.unlocked_at DESC
-        """, (user_id,))
-        unlocked = cur.fetchall()
+        unlocked_achievements = db.execute("""
+            SELECT achievement_id FROM user_achievements WHERE user_id = ?
+        """, (user_id,)).fetchall()
         
-        # Get total achievements
-        total_achievements = db.execute("SELECT COUNT(*) as count FROM achievements").fetchone()["count"]
-        unlocked_count = len(unlocked)
+        unlocked_ids = [row["achievement_id"] for row in unlocked_achievements]
         
-        if unlocked_count == 0:
-            achievements_text = (
-                f"🏅 <b>Achievements</b>\n\n"
-                f"🎯 Unlocked: 0/{total_achievements}\n\n"
-                f"Play matches to unlock achievements!\n"
-                f"Try winning your first match, scoring a century, or hitting boundaries!"
+        # Get user stats for progress calculation
+        stats = db.execute("SELECT * FROM stats WHERE user_id = ?", (user_id,)).fetchone()
+        user_stats = dict(stats) if stats else {}
+        
+        achievements_text = "🏅 <b>Achievements Gallery</b>\n\n"
+        
+        unlocked_count = 0
+        total_points = 0
+        
+        for achievement in ACHIEVEMENTS_LIST:
+            is_unlocked = achievement["id"] in unlocked_ids
+            
+            if is_unlocked:
+                unlocked_count += 1
+                total_points += achievement["points"]
+                status_icon = "✅"
+                progress_text = "COMPLETED!"
+            else:
+                status_icon = "⬜"
+                # Calculate progress
+                current_value = user_stats.get(achievement["requirement_type"], 0)
+                target_value = achievement["requirement_value"]
+                
+                if current_value >= target_value:
+                    progress_text = "🎯 Ready to claim!"
+                else:
+                    progress_percentage = min(100, (current_value / target_value) * 100)
+                    progress_text = f"📊 {current_value}/{target_value} ({progress_percentage:.0f}%)"
+            
+            achievements_text += (
+                f"{status_icon} {achievement['icon']} <b>{achievement['name']}</b>\n"
+                f"   {achievement['description']}\n"
+                f"   {progress_text} • +{achievement['points']} points\n\n"
+            )
+        
+        # Add summary
+        summary_text = (
+            f"📊 <b>Progress Summary</b>\n"
+            f"🎯 Completed: {unlocked_count}/{len(ACHIEVEMENTS_LIST)}\n"
+            f"⭐ Total Points: {total_points}\n"
+            f"🏆 Completion: {(unlocked_count/len(ACHIEVEMENTS_LIST)*100):.1f}%"
+        )
+        
+        full_text = achievements_text + summary_text
+        
+        # Split message if too long
+        if len(full_text) > 4000:
+            bot.send_message(chat_id, achievements_text)
+            bot.send_message(chat_id, summary_text)
+        else:
+            bot.send_message(chat_id, full_text)
+
+# Update the callback handler to include tournament functionality
+def handle_tournament_callbacks(call: types.CallbackQuery):
+    """Handle tournament-related callbacks"""
+    data = call.data
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    message_id = call.message.message_id
+    
+    if data == "tournament":
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🏆 <b>Tournament Central</b>\n\n"
+            "Welcome to the ultimate cricket competition hub!\n"
+            "Join existing tournaments or create your own championship!",
+            chat_id, message_id, reply_markup=kb_tournament_main()
+        )
+    
+    elif data == "tournament_join":
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🎯 <b>Available Tournaments</b>\n\nBrowse and join active tournaments:",
+            chat_id, message_id
+        )
+        show_tournaments(chat_id, "registration")
+    
+    elif data == "tournament_create":
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🎮 <b>Create Tournament</b>\n\nSelect tournament format:",
+            chat_id, message_id, reply_markup=kb_tournament_formats()
+        )
+    
+    elif data.startswith("tourney_format_"):
+        format_key = data.split("_")[-1]
+        set_session_data(user_id, "tournament_format", format_key)
+        
+        format_info = TOURNAMENT_FORMATS.get(format_key, TOURNAMENT_FORMATS["quick"])
+        bot.edit_message_text(
+            f"✅ <b>Format Selected:</b> {format_info['name']}\n\n"
+            f"Choose tournament size:",
+            chat_id, message_id, reply_markup=kb_tournament_sizes()
+        )
+    
+    elif data.startswith("tourney_size_"):
+        size = int(data.split("_")[-1])
+        format_key = get_session_data(user_id, "tournament_format", "quick")
+        
+        # Create tournament
+        tournament_name = f"{TOURNAMENT_FORMATS[format_key]['name']} Championship"
+        tournament_id = create_tournament(user_id, tournament_name, format_key, "knockout", size)
+        
+        bot.edit_message_text(
+            f"🏆 <b>Tournament Created!</b>\n\n"
+            f"Name: {tournament_name}\n"
+            f"Size: {size} players\n"
+            f"Status: Registration Open\n\n"
+            f"Tournament ID: #{tournament_id}\n"
+            f"Share this with friends to join!",
+            chat_id, message_id
+        )
+        
+        # Clear session
+        if user_id in user_sessions:
+            user_sessions[user_id].clear()
+    
+    elif data.startswith("join_tournament_"):
+        tournament_id = int(data.split("_")[-1])
+        
+        # Get user info
+        user = bot.get_chat_member(chat_id, user_id).user
+        display_name = user.first_name or f"@{user.username}" if user.username else f"User{user_id}"
+        
+        result = join_tournament(tournament_id, user_id, user.username or "", display_name)
+        
+        if result["success"]:
+            bot.answer_callback_query(call.id, f"🎉 {result['message']}")
+            bot.edit_message_text(
+                f"✅ <b>Successfully Joined Tournament!</b>\n\n"
+                f"Your seed: #{result['seed']}\n"
+                f"Status: Waiting for more players...\n\n"
+                f"Tournament will start when full!",
+                chat_id, message_id
             )
         else:
-            total_points = sum(a["points"] for a in unlocked)
-            achievements_text = (
-                f"🏅 <b>Your Achievements</b>\n\n"
-                f"🎯 Unlocked: {unlocked_count}/{total_achievements}\n"
-                f"⭐ Total Points: {total_points}\n\n"
+            bot.answer_callback_query(call.id, f"❌ {result['message']}")
+    
+    elif data == "tournament_active":
+        bot.answer_callback_query(call.id)
+        show_tournaments(chat_id, "ongoing")
+    
+    elif data.startswith("tournament_bracket_"):
+        tournament_id = int(data.split("_")[-1])
+        bot.answer_callback_query(call.id)
+        show_tournament_bracket(chat_id, tournament_id)
+
+# Update your main callback handler to include tournament and enhanced achievements
+# Add this to your existing handle_callbacks function:
+
+# In the main handle_callbacks function, add these cases:
+
+# Also update your db_init() function to include:
+
+
+# Add this tournament automation function
+def check_tournament_automation():
+    """Background task to manage tournament progression"""
+    with db_conn() as db:
+        # Check for tournaments ready to start
+        ready_tournaments = db.execute("""
+            SELECT t.* FROM tournaments t
+            WHERE t.status = 'registration' 
+            AND t.current_participants >= 2
+            AND datetime(t.registration_deadline) <= datetime('now')
+        """).fetchall()
+        
+        for tournament in ready_tournaments:
+            if start_tournament(tournament["id"]):
+                logger.info(f"Auto-started tournament {tournament['id']}")
+        
+        # Check for completed matches and advance rounds
+        # This would be expanded based on your match completion logic
+
+# Tournament Live Match System
+def create_tournament_match(tournament_id: int, round_number: int, player1_id: int, player2_id: int):
+    """Create and manage a tournament match"""
+    with db_conn() as db:
+        tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        if not tournament:
+            return None
+        
+        format_info = TOURNAMENT_FORMATS.get(tournament["format"], TOURNAMENT_FORMATS["quick"])
+        
+        # Create a special tournament game
+        match_id = f"tournament_{tournament_id}_{round_number}_{player1_id}_{player2_id}"
+        
+        # Store match context in session for both players
+        match_context = {
+            "tournament_id": tournament_id,
+            "round_number": round_number,
+            "player1_id": player1_id,
+            "player2_id": player2_id,
+            "format": tournament["format"],
+            "overs": format_info["overs"],
+            "wickets": format_info["wickets"],
+            "difficulty": tournament["difficulty_level"]
+        }
+        
+        return match_context
+
+def handle_tournament_match_completion(chat_id: int, game_data: dict, winner_id: int, loser_id: int):
+    """Handle completion of a tournament match"""
+    if not game_data.get("is_tournament_match"):
+        return
+    
+    tournament_id = game_data.get("tournament_id")
+    round_number = game_data.get("round_number")
+    
+    with db_conn() as db:
+        # Update match result
+        db.execute("""
+            UPDATE tournament_matches SET
+                winner_id = ?,
+                match_status = 'completed',
+                completed_at = ?
+            WHERE tournament_id = ? AND round_number = ? 
+            AND ((player1_id = ? AND player2_id = ?) OR (player1_id = ? AND player2_id = ?))
+        """, (winner_id, datetime.now(timezone.utc).isoformat(), tournament_id, round_number,
+              winner_id, loser_id, loser_id, winner_id))
+        
+        # Update participant status
+        db.execute("""
+            UPDATE tournament_participants SET
+                is_eliminated = TRUE,
+                elimination_round = ?,
+                eliminated_at = ?
+            WHERE tournament_id = ? AND user_id = ?
+        """, (round_number, datetime.now(timezone.utc).isoformat(), tournament_id, loser_id))
+        
+        # Check if round is complete
+        check_and_advance_tournament_round(tournament_id, round_number)
+
+def check_and_advance_tournament_round(tournament_id: int, current_round: int):
+    """Check if tournament round is complete and advance to next round"""
+    with db_conn() as db:
+        # Count remaining matches in current round
+        pending_matches = db.execute("""
+            SELECT COUNT(*) as count FROM tournament_matches
+            WHERE tournament_id = ? AND round_number = ? AND match_status = 'pending'
+        """, (tournament_id, current_round)).fetchone()["count"]
+        
+        if pending_matches > 0:
+            return  # Round not complete yet
+        
+        # Get tournament info
+        tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        
+        # Get winners from current round
+        winners = db.execute("""
+            SELECT winner_id FROM tournament_matches
+            WHERE tournament_id = ? AND round_number = ?
+        """, (tournament_id, current_round)).fetchall()
+        
+        winner_ids = [w["winner_id"] for w in winners]
+        
+        if len(winner_ids) <= 1:
+            # Tournament complete!
+            complete_tournament(tournament_id, winner_ids[0] if winner_ids else None)
+        else:
+            # Create next round
+            create_next_tournament_round(tournament_id, current_round + 1, winner_ids)
+
+def create_next_tournament_round(tournament_id: int, round_number: int, participant_ids: list):
+    """Create matches for next tournament round"""
+    with db_conn() as db:
+        match_number = 1
+        
+        # Pair up participants for next round
+        for i in range(0, len(participant_ids), 2):
+            if i + 1 < len(participant_ids):
+                p1_id = participant_ids[i]
+                p2_id = participant_ids[i + 1]
+                
+                # Get participant names
+                p1 = db.execute("SELECT display_name FROM tournament_participants WHERE tournament_id = ? AND user_id = ?", 
+                               (tournament_id, p1_id)).fetchone()
+                p2 = db.execute("SELECT display_name FROM tournament_participants WHERE tournament_id = ? AND user_id = ?", 
+                               (tournament_id, p2_id)).fetchone()
+                
+                db.execute("""
+                    INSERT INTO tournament_matches (
+                        tournament_id, round_number, match_number,
+                        player1_id, player2_id, player1_name, player2_name,
+                        match_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """, (tournament_id, round_number, match_number,
+                      p1_id, p2_id, p1["display_name"], p2["display_name"],
+                      datetime.now(timezone.utc).isoformat()))
+                
+                match_number += 1
+        
+        # Update tournament current round
+        db.execute("UPDATE tournaments SET current_round = ? WHERE id = ?", 
+                  (round_number, tournament_id))
+        
+        # Notify participants
+        notify_tournament_round_start(tournament_id, round_number)
+
+def complete_tournament(tournament_id: int, winner_id: int):
+    """Complete tournament and distribute prizes"""
+    with db_conn() as db:
+        tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        
+        # Update tournament status
+        db.execute("""
+            UPDATE tournaments SET
+                status = 'completed',
+                winner_id = ?,
+                end_date = ?
+            WHERE id = ?
+        """, (winner_id, datetime.now(timezone.utc).isoformat(), tournament_id))
+        
+        # Distribute prizes and titles
+        distribute_tournament_rewards(tournament_id, tournament["prize_pool"])
+        
+        # Update participant stats
+        update_tournament_stats(tournament_id)
+        
+        # Send completion notifications
+        notify_tournament_completion(tournament_id)
+
+def distribute_tournament_rewards(tournament_id: int, prize_pool: int):
+    """Distribute rewards to tournament participants"""
+    with db_conn() as db:
+        # Get final rankings
+        participants = db.execute("""
+            SELECT tp.*, tm.round_number as eliminated_round
+            FROM tournament_participants tp
+            LEFT JOIN (
+                SELECT tournament_id, 
+                       CASE WHEN winner_id = player1_id THEN player2_id 
+                            ELSE player1_id END as eliminated_player,
+                       round_number
+                FROM tournament_matches 
+                WHERE tournament_id = ?
+            ) tm ON tp.tournament_id = tm.tournament_id AND tp.user_id = tm.eliminated_player
+            WHERE tp.tournament_id = ?
+            ORDER BY COALESCE(tm.round_number, 999) DESC, tp.total_runs DESC
+        """, (tournament_id, tournament_id)).fetchall()
+        
+        # Distribute prizes based on final position
+        total_prize = prize_pool
+        
+        for i, participant in enumerate(participants[:4]):  # Top 4 get prizes
+            position = i + 1
+            
+            if position == 1:  # Winner
+                prize = int(total_prize * 0.5)  # 50% to winner
+                title = TOURNAMENT_REWARDS["winner"]["title"]
+                trophy_points = TOURNAMENT_REWARDS["winner"]["trophy_points"]
+            elif position == 2:  # Runner-up
+                prize = int(total_prize * 0.3)  # 30% to runner-up
+                title = TOURNAMENT_REWARDS["runner_up"]["title"]
+                trophy_points = TOURNAMENT_REWARDS["runner_up"]["trophy_points"]
+            elif position == 3:  # Third place
+                prize = int(total_prize * 0.15)  # 15% to third
+                title = TOURNAMENT_REWARDS["semi_finalist"]["title"]
+                trophy_points = TOURNAMENT_REWARDS["semi_finalist"]["trophy_points"]
+            else:  # Fourth place
+                prize = int(total_prize * 0.05)  # 5% to fourth
+                title = TOURNAMENT_REWARDS["quarter_finalist"]["title"]
+                trophy_points = TOURNAMENT_REWARDS["quarter_finalist"]["trophy_points"]
+            
+            # Give coins to user
+            db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", 
+                      (prize, participant["user_id"]))
+            
+            # Record ranking
+            db.execute("""
+                INSERT INTO tournament_rankings (
+                    tournament_id, user_id, final_position, 
+                    tournament_points, prize_won, title_earned
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (tournament_id, participant["user_id"], position, 
+                  trophy_points, prize, title))
+
+def notify_tournament_completion(tournament_id: int):
+    """Send tournament completion notifications to all participants"""
+    with db_conn() as db:
+        tournament = db.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        rankings = db.execute("""
+            SELECT tr.*, u.first_name, tp.display_name
+            FROM tournament_rankings tr
+            JOIN users u ON tr.user_id = u.user_id
+            JOIN tournament_participants tp ON tr.tournament_id = tp.tournament_id AND tr.user_id = tp.user_id
+            WHERE tr.tournament_id = ?
+            ORDER BY tr.final_position
+            LIMIT 3
+        """, (tournament_id,)).fetchall()
+        
+        completion_text = f"🏆 <b>{tournament['name']} - COMPLETED!</b>\n\n"
+        
+        for rank in rankings:
+            position_emoji = "🥇" if rank["final_position"] == 1 else "🥈" if rank["final_position"] == 2 else "🥉"
+            completion_text += f"{position_emoji} {rank['display_name']} - {rank['title_earned']}\n"
+        
+        completion_text += f"\nTotal Prize Pool: {tournament['prize_pool']} coins distributed!"
+        
+        # Send to all participants
+        participants = db.execute("""
+            SELECT user_id FROM tournament_participants WHERE tournament_id = ?
+        """, (tournament_id,)).fetchall()
+        
+        for participant in participants:
+            try:
+                bot.send_message(participant["user_id"], completion_text)
+            except Exception as e:
+                logger.warning(f"Could not notify user {participant['user_id']}: {e}")
+
+# Enhanced Tournament Features
+def show_tournament_details(chat_id: int, tournament_id: int):
+    """Show detailed tournament information"""
+    with db_conn() as db:
+        tournament = db.execute("""
+            SELECT t.*, u.first_name as creator_name 
+            FROM tournaments t
+            LEFT JOIN users u ON t.created_by = u.user_id
+            WHERE t.id = ?
+        """, (tournament_id,)).fetchone()
+        
+        if not tournament:
+            bot.send_message(chat_id, "❌ Tournament not found")
+            return
+        
+        format_info = TOURNAMENT_FORMATS.get(tournament["format"], TOURNAMENT_FORMATS["quick"])
+        
+        # Get participants
+        participants = db.execute("""
+            SELECT display_name, seed_number, matches_won, total_runs
+            FROM tournament_participants
+            WHERE tournament_id = ?
+            ORDER BY seed_number
+        """, (tournament_id,)).fetchall()
+        
+        details_text = (
+            f"🏆 <b>{tournament['name']}</b>\n\n"
+            f"📋 <b>Tournament Details:</b>\n"
+            f"• Format: {format_info['name']}\n"
+            f"• Type: {tournament['tournament_type'].title()}\n"
+            f"• Status: {tournament['status'].title()}\n"
+            f"• Players: {tournament['current_participants']}/{tournament['max_participants']}\n"
+            f"• Entry Fee: {tournament['entry_fee']} coins\n"
+            f"• Prize Pool: {tournament['prize_pool']} coins\n"
+            f"• Created by: {tournament['creator_name'] or 'Anonymous'}\n\n"
+        )
+        
+        if tournament["status"] == "ongoing":
+            details_text += f"⚡ Current Round: {tournament['current_round']}/{tournament['total_rounds']}\n\n"
+        
+        if participants:
+            details_text += "👥 <b>Participants:</b>\n"
+            for i, p in enumerate(participants[:10]):  # Show first 10
+                status = "🏆" if tournament["winner_id"] and tournament["winner_id"] == p.get("user_id") else ""
+                details_text += f"{p['seed_number']}. {p['display_name']} {status}\n"
+            
+            if len(participants) > 10:
+                details_text += f"... and {len(participants) - 10} more"
+        
+        bot.send_message(chat_id, details_text)
+
+def show_my_tournaments(chat_id: int, user_id: int):
+    """Show user's tournament history and current tournaments"""
+    with db_conn() as db:
+        # Current tournaments
+        current = db.execute("""
+            SELECT t.*, tp.seed_number, tp.is_eliminated
+            FROM tournaments t
+            JOIN tournament_participants tp ON t.id = tp.tournament_id
+            WHERE tp.user_id = ? AND t.status IN ('registration', 'ongoing')
+            ORDER BY t.created_at DESC
+        """, (user_id,)).fetchall()
+        
+        # Past tournaments with rankings
+        past = db.execute("""
+            SELECT t.name, tr.final_position, tr.prize_won, tr.title_earned, t.created_at
+            FROM tournaments t
+            JOIN tournament_rankings tr ON t.id = tr.tournament_id
+            WHERE tr.user_id = ? AND t.status = 'completed'
+            ORDER BY t.created_at DESC
+            LIMIT 10
+        """, (user_id,)).fetchall()
+        
+        my_tournaments_text = "🏆 <b>My Tournaments</b>\n\n"
+        
+        if current:
+            my_tournaments_text += "⚡ <b>Current Tournaments:</b>\n"
+            for t in current:
+                status = "❌ Eliminated" if t["is_eliminated"] else "✅ Active"
+                my_tournaments_text += f"• {t['name']} - Seed #{t['seed_number']} ({status})\n"
+            my_tournaments_text += "\n"
+        
+        if past:
+            my_tournaments_text += "📚 <b>Tournament History:</b>\n"
+            for t in past:
+                position_emoji = "🥇" if t["final_position"] == 1 else "🥈" if t["final_position"] == 2 else "🥉" if t["final_position"] == 3 else f"#{t['final_position']}"
+                my_tournaments_text += (f"{position_emoji} {t['name']}\n"
+                                      f"   {t['title_earned']} • +{t['prize_won']} coins\n\n")
+        
+        if not current and not past:
+            my_tournaments_text += "📝 No tournaments yet! Join one to get started."
+        
+        bot.send_message(chat_id, my_tournaments_text)
+
+# Tournament Spectator Features
+def show_live_tournament_matches(chat_id: int):
+    """Show ongoing tournament matches that can be spectated"""
+    with db_conn() as db:
+        live_matches = db.execute("""
+            SELECT tm.*, t.name as tournament_name
+            FROM tournament_matches tm
+            JOIN tournaments t ON tm.tournament_id = t.id
+            WHERE tm.match_status = 'in_progress'
+            ORDER BY tm.created_at DESC
+            LIMIT 5
+        """).fetchall()
+        
+        if not live_matches:
+            bot.send_message(chat_id, "📺 No live tournament matches at the moment.")
+            return
+        
+        for match in live_matches:
+            match_text = (
+                f"📺 <b>LIVE: {match['tournament_name']}</b>\n"
+                f"Round {match['round_number']} - Match {match['match_number']}\n\n"
+                f"🥊 {match['player1_name']} vs {match['player2_name']}\n"
+                f"Score: {match['player1_score']}/{match['player1_wickets']} vs {match['player2_score']}/{match['player2_wickets']}"
             )
             
-            for achievement in unlocked[:10]:  # Show latest 10
-                date = datetime.fromisoformat(achievement["unlocked_at"]).strftime("%b %d")
-                achievements_text += (
-                    f"{achievement['icon']} <b>{achievement['name']}</b>\n"
-                    f"   {achievement['description']}\n"
-                    f"   +{achievement['points']} points • {date}\n\n"
-                )
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("👀 Spectate", 
+                                            callback_data=f"spectate_{match['tournament_id']}_{match['id']}"))
             
-            if unlocked_count > 10:
-                achievements_text += f"... and {unlocked_count - 10} more!"
+            bot.send_message(chat_id, match_text, reply_markup=kb)
+
+# Tournament Statistics and Analytics
+def generate_tournament_analytics():
+    """Generate tournament analytics and insights"""
+    with db_conn() as db:
+        # Most successful players
+        top_players = db.execute("""
+            SELECT u.first_name, u.username,
+                   COUNT(tr.tournament_id) as tournaments_played,
+                   SUM(CASE WHEN tr.final_position = 1 THEN 1 ELSE 0 END) as wins,
+                   AVG(tr.final_position) as avg_position,
+                   SUM(tr.prize_won) as total_prizes
+            FROM tournament_rankings tr
+            JOIN users u ON tr.user_id = u.user_id
+            GROUP BY tr.user_id
+            HAVING tournaments_played >= 3
+            ORDER BY wins DESC, avg_position ASC
+            LIMIT 10
+        """).fetchall()
         
-        bot.send_message(chat_id, achievements_text)
+        # Popular formats
+        popular_formats = db.execute("""
+            SELECT format, COUNT(*) as tournament_count,
+                   AVG(current_participants) as avg_participants
+            FROM tournaments
+            WHERE status = 'completed'
+            GROUP BY format
+            ORDER BY tournament_count DESC
+        """).fetchall()
+        
+        analytics = {
+            "top_players": top_players,
+            "popular_formats": popular_formats
+        }
+        
+        return analytics
+
+# Anti-cheat and Fair Play Systems
+def detect_suspicious_activity(user_id: int, tournament_id: int):
+    """Detect potential cheating or suspicious patterns"""
+    with db_conn() as db:
+        # Check for unusual win patterns, extremely high scores, etc.
+        recent_matches = db.execute("""
+            SELECT * FROM match_history
+            WHERE user_id = ? AND created_at > datetime('now', '-24 hours')
+            ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+        
+        # Implement anti-cheat logic here
+        # For example: consecutive perfect scores, impossible reaction times, etc.
+        
+        suspicious_flags = []
+        
+        # Check for too many perfect games
+        perfect_games = sum(1 for match in recent_matches if match["player_wickets"] == 0 and match["player_score"] > 50)
+        if perfect_games > 5:
+            suspicious_flags.append("too_many_perfect_games")
+        
+        return suspicious_flags
+
+# Tournament Rewards and Achievements Integration
+def award_tournament_achievements(user_id: int, tournament_result: dict):
+    """Award achievements based on tournament performance"""
+    with db_conn() as db:
+        # Check for tournament-specific achievements
+        if tournament_result.get("final_position") == 1:
+            # Award "Tournament Winner" achievement
+            award_achievement(user_id, 12)  # Tournament Winner achievement
+        
+        # Update tournament stats
+        db.execute("""
+            UPDATE stats SET 
+                tournaments_played = tournaments_played + 1,
+                tournaments_won = tournaments_won + CASE WHEN ? = 1 THEN 1 ELSE 0 END
+            WHERE user_id = ?
+        """, (tournament_result.get("final_position", 0), user_id))
+
+def award_achievement(user_id: int, achievement_id: int):
+    """Award an achievement to a user"""
+    with db_conn() as db:
+        # Check if already awarded
+        existing = db.execute("""
+            SELECT user_id FROM user_achievements 
+            WHERE user_id = ? AND achievement_id = ?
+        """, (user_id, achievement_id)).fetchone()
+        
+        if not existing:
+            db.execute("""
+                INSERT INTO user_achievements (user_id, achievement_id, unlocked_at)
+                VALUES (?, ?, ?)
+            """, (user_id, achievement_id, datetime.now(timezone.utc).isoformat()))
+            
+            # Notify user
+            achievement = next((a for a in ACHIEVEMENTS_LIST if a["id"] == achievement_id), None)
+            if achievement:
+                try:
+                    bot.send_message(user_id, 
+                                   f"🏅 <b>Achievement Unlocked!</b>\n\n"
+                                   f"{achievement['icon']} <b>{achievement['name']}</b>\n"
+                                   f"{achievement['description']}\n"
+                                   f"+{achievement['points']} points!")
+                except:
+                    pass  # User might have blocked the bot
+
+# Enhanced Tournament Matchmaking
+def create_balanced_tournament_bracket(tournament_id: int):
+    """Create a balanced tournament bracket based on player ratings"""
+    with db_conn() as db:
+        # Get participants with their skill ratings
+        participants = db.execute("""
+            SELECT tp.*, s.wins, s.losses, s.avg_score, s.high_score
+            FROM tournament_participants tp
+            JOIN stats s ON tp.user_id = s.user_id
+            WHERE tp.tournament_id = ?
+            ORDER BY s.wins DESC, s.avg_score DESC
+        """, (tournament_id,)).fetchall()
+        
+        # Implement seeding based on player stats
+        # Higher skilled players get better seeds
+        for i, participant in enumerate(participants):
+            db.execute("""
+                UPDATE tournament_participants 
+                SET seed_number = ?
+                WHERE tournament_id = ? AND user_id = ?
+            """, (i + 1, tournament_id, participant["user_id"]))
+
+# Add this to your background tasks initialization
+def start_tournament_background_tasks():
+    """Start tournament-specific background tasks"""
+    def tournament_automation():
+        while True:
+            try:
+                check_tournament_automation()
+                time.sleep(300)  # Check every 5 minutes
+            except Exception as e:
+                logger.error(f"Error in tournament automation: {e}")
+                time.sleep(600)  # Wait 10 minutes on error
+    
+    thread = threading.Thread(target=tournament_automation, daemon=True)
+    thread.start()
+    logger.info("Tournament background tasks started")
+
+# Add tournament tasks to your main setup
+def enhanced_setup_bot():
+    """Enhanced setup with tournament features"""
+    setup_bot()  # Your existing setup
+    start_tournament_background_tasks()
+
 
 # ======================================================
 # Callback Query Handlers
@@ -1622,6 +3683,13 @@ def handle_callbacks(call: types.CallbackQuery):
                 logger.error(f"Error showing custom match: {e}")
                 bot.answer_callback_query(call.id, "❌ Error loading custom match options")
                 
+
+        
+        elif data.startswith("tournament_") or data.startswith("tourney_") or data.startswith("join_tournament_"):
+            handle_tournament_callbacks(call)
+        elif data == "achievements":
+            bot.answer_callback_query(call.id)
+            show_achievements_enhanced(chat_id, user_id)  # REPLACE show_achievements        
         elif data.startswith("format_"):
             bot.answer_callback_query(call.id)
             try:
@@ -1783,7 +3851,9 @@ def handle_callbacks(call: types.CallbackQuery):
         
         # Tournament and Challenges (placeholder)
         elif data == "tournament":
-            bot.answer_callback_query(call.id, "🏆 Tournament feature coming soon!")
+            handle_tournament_callbacks(call)
+        elif data.startswith("tournament_") or data.startswith("tourney_") or data.startswith("join_tournament_"):
+            handle_tournament_callbacks(call)
             
         elif data == "challenges":
             bot.answer_callback_query(call.id, "🎯 Daily challenges coming soon!")
@@ -1821,6 +3891,10 @@ def handle_callbacks(call: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         bot.answer_callback_query(call.id, "❌ Something went wrong!")
+
+def show_achievements(chat_id: int, user_id: int):
+    """Placeholder for original achievements function"""
+    show_achievements_enhanced(chat_id, user_id)
 
 def handle_toss(call: types.CallbackQuery):
     """Handle toss with safe game operations"""
@@ -1866,6 +3940,7 @@ def handle_toss(call: types.CallbackQuery):
         logger.error(f"Error handling toss: {e}")
         bot.answer_callback_query(call.id, "❌ Error processing toss")
 
+
 def handle_batting_choice(call: types.CallbackQuery):
     """Handle batting choice with safe operations"""
     chat_id = call.message.chat.id
@@ -1905,7 +3980,7 @@ def handle_text_messages(message: types.Message):
             number = int(text)
             if 1 <= number <= 6:
                 log_event(message.chat.id, "ball_input", f"from={message.from_user.id} n={number}")
-                process_ball(message.chat.id, number)
+                enhanced_process_ball(message.chat.id, number)
                 return
             else:
                 bot.reply_to(message, "🎯 Please send a number between 1️⃣ and 6️⃣")
@@ -1918,7 +3993,7 @@ def handle_text_messages(message: types.Message):
         if text in emoji_to_num:
             number = emoji_to_num[text]
             log_event(message.chat.id, "ball_input", f"from={message.from_user.id} n={number}")
-            process_ball(message.chat.id, number)
+            enhanced_process_ball(message.chat.id, number)
             return
         
         # Handle quick commands through text
@@ -2175,6 +4250,7 @@ def upsert_user(u: types.User):
 def main():
     """Main application entry point"""
     setup_bot()
+    initialize_tournament_system()  # ADD this line
     
     if USE_WEBHOOK:
         if not WEBHOOK_URL:

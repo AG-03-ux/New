@@ -1361,8 +1361,13 @@ def ensure_user(message: types.Message):
 @bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
     try:
-        logger.info(f"User {message.from_user.id} started the bot")
+        # Checkpoint 1: We entered the function
+        logger.info(f"--- /start command received from user {message.from_user.id} ---")
+
         ensure_user(message)
+        
+        # Checkpoint 2: The user was successfully created/updated in the DB
+        logger.info(f"User {message.from_user.id} processed by ensure_user.")
         
         welcome_text = (
             f"🏏 <b>Welcome to Cricket Bot, {message.from_user.first_name}!</b>\n\n"
@@ -1375,10 +1380,18 @@ def cmd_start(message: types.Message):
             f"Ready to play some cricket?"
         )
         
+        # Checkpoint 3: We are about to send the welcome message
+        logger.info(f"Attempting to send welcome message to chat {message.chat.id}.")
+
         bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
+
+        # Checkpoint 4: The message was sent successfully
+        logger.info(f"--- Welcome message sent successfully to {message.chat.id} ---")
+
     except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        bot.send_message(message.chat.id, "Welcome to Cricket Bot! Use /help for assistance.")
+        # This will catch any error inside this function and log it
+        logger.error(f"!!! CRITICAL ERROR in cmd_start: {e} !!!", exc_info=True)
+        bot.send_message(message.chat.id, "An error occurred while starting the bot. The developer has been notified.")
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):

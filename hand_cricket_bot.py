@@ -332,11 +332,12 @@ def db_init():
 def log_event(chat_id: int, event: str, meta: str = ""):
     """Log events safely"""
     try:
-        with get_db_connection() as db:
-            db.execute(
-                "INSERT INTO history (chat_id, event, meta, created_at) VALUES (%s, %s, %s, %s)",
-                (chat_id, event, meta, datetime.now(timezone.utc).isoformat())
-            )
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO history (chat_id, event, meta, created_at) VALUES (%s, %s, %s, %s)",
+                    (chat_id, event, meta, datetime.now(timezone.utc).isoformat())
+                )
     except Exception as e:
         logger.error(f"Error logging event: {e}")
 
@@ -389,12 +390,14 @@ class GameState:
     
     def _load_or_create(self) -> Dict[str, Any]:
         try:
-            with get_db_connection() as db:
-                row = db.execute("SELECT * FROM games WHERE chat_id = %s", (self.chat_id,)).fetchone()
-                if row:
-                    return dict(row)
-                else:
-                    return self._create_default_game()
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM games WHERE chat_id = %s", (self.chat_id,))
+                    row = cur.fetchone()
+                    if row:
+                        return dict(row)
+                    else:
+                        return self._create_default_game()
         except Exception as e:
             logger.error(f"Error loading game state: {e}")
             return self._create_default_game()
@@ -480,13 +483,14 @@ class GameState:
     
     def delete(self) -> bool:
         try:
-            with get_db_connection() as db:
-                db.execute("DELETE FROM games WHERE chat_id = %s", (self.chat_id,))
-                return True
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM games WHERE chat_id = %s", (self.chat_id,))
+                    return True
         except Exception as e:
             logger.error(f"Failed to delete game: {e}")
             return False
-    
+
     def update(self, **kwargs):
         self.data.update(kwargs)
         self.data['updated_at'] = datetime.now(timezone.utc).isoformat()
@@ -969,10 +973,7 @@ def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: 
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Get user_id from recent history or use a fallback method
-                user_id = None
-                
-                # Try to get from recent ball input events
+                # Get user_id from recent history
                 cur.execute("""
                     SELECT meta FROM history 
                     WHERE chat_id=%s AND event='ball_input' 
@@ -980,35 +981,35 @@ def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: 
                 """, (chat_id,))
                 
                 row = cur.fetchone()
-            
-            if row and row["meta"]:
-                try:
-                    # Parse meta field for user info
-                    parts = dict(kv.split("=") for kv in row["meta"].split() if "=" in kv)
-                    user_id = int(parts.get("from", "0"))
-                except:
-                    pass
-            
-            if user_id and user_id > 0:
-                total_balls = g["player_balls_faced"] + g["bot_balls_faced"]
-                duration_minutes = max(1, total_balls // 12)
+                user_id = None
                 
-                now = datetime.now(timezone.utc).isoformat()
-                cur.execute("""
-                    INSERT INTO match_history (
-                        chat_id, user_id, match_format, player_score, bot_score,
-                        player_wickets, bot_wickets, overs_played, result, margin,
-                        player_strike_rate, match_duration_minutes, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,(
-                    chat_id, user_id, g["match_format"], g["player_score"], g["bot_score"],
-                    g["player_wkts"], g["bot_wkts"], 
-                    g["overs_bowled"] + (g["balls_in_over"]/6.0),
-                    result, margin,
-                    (g["player_score"]/max(g["player_balls_faced"], 1)*100),
-                    duration_minutes, now
-                ))
+                if row and row["meta"]:
+                    try:
+                        parts = dict(kv.split("=") for kv in row["meta"].split() if "=" in kv)
+                        user_id = int(parts.get("from", "0"))
+                    except:
+                        pass
                 
+                if user_id and user_id > 0:
+                    total_balls = g["player_balls_faced"] + g["bot_balls_faced"]
+                    duration_minutes = max(1, total_balls // 12)
+                    now = datetime.now(timezone.utc).isoformat()
+                    
+                    cur.execute("""
+                        INSERT INTO match_history (
+                            chat_id, user_id, match_format, player_score, bot_score,
+                            player_wickets, bot_wickets, overs_played, result, margin,
+                            player_strike_rate, match_duration_minutes, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        chat_id, user_id, g["match_format"], g["player_score"], g["bot_score"],
+                        g["player_wkts"], g["bot_wkts"], 
+                        g["overs_bowled"] + (g["balls_in_over"]/6.0),
+                        result, margin,
+                        (g["player_score"]/max(g["player_balls_faced"], 1)*100),
+                        duration_minutes, now
+                    ))
+                    
     except Exception as e:
         logger.error(f"Error saving match history: {e}")
 
@@ -1346,17 +1347,19 @@ def show_achievements(chat_id: int, user_id: int):
             else:
                 locked.append("🔒 Experienced Player - Play 10 matches")
             
+            if unlocked:
+                achievements_text += "<b>Unlocked:</b>\n"
+                for achievement in unlocked:
+                    achievements_text += f"✅ {achievement}\n"
+                achievements_text += "\n"
+
             if locked:
-                achievements_text += "\n<b>Locked:</b>\n"
-                for achievement in locked:
-                    achievements_text += f"\n"
-            
-            if locked:
-                achievements_text += "\n<b>Locked:</b>\n"
+                achievements_text += "<b>Locked:</b>\n"
                 for achievement in locked:
                     achievements_text += f"{achievement}\n"
-            
+
             bot.send_message(chat_id, achievements_text)
+            
             
     except Exception as e:
         logger.error(f"Error showing achievements: {e}")
@@ -1794,3 +1797,21 @@ def webhook():
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
+
+
+# Initialize database when module loads (for Gunicorn)
+try:
+    logger.info("Initializing database for production...")
+    db_init()
+    logger.info("Database initialized successfully")
+    
+    # Set webhook for production
+    if WEBHOOK_URL and USE_WEBHOOK:
+        webhook_url = WEBHOOK_URL.rstrip('/')
+        if not webhook_url.endswith('/' + TOKEN):
+            webhook_url += '/' + TOKEN
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
+        
+except Exception as e:
+    logger.error(f"Critical error during initialization: {e}", exc_info=True)

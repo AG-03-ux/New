@@ -309,6 +309,7 @@ def db_init():
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
+    db_init()
 
 def log_event(chat_id: int, event: str, meta: str = ""):
     """Log events safely"""

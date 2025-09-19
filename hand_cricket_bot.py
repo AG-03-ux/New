@@ -1721,6 +1721,9 @@ def init_all():
 if __name__ == "__main__":
     init_all()
     
+    # Get port from environment variable (Render sets this to 10000)
+    port = int(os.environ.get("PORT", 10000))
+    
     if USE_WEBHOOK:
         logger.info("Starting bot in webhook mode")
         
@@ -1747,9 +1750,9 @@ if __name__ == "__main__":
                 if webhook_info and webhook_info.url == webhook_url:
                     logger.info("Webhook set successfully")
                     
-                    # Start Flask server
-                    logger.info(f"Starting Flask server on port {PORT}")
-                    app.run(host='0.0.0.0', port=PORT, threaded=True)
+                    # Start Flask server on the correct port
+                    logger.info(f"Starting Flask server on port {port}")
+                    app.run(host='0.0.0.0', port=port, threaded=True)
                 else:
                     logger.error("Failed to set webhook correctly")
                     logger.info("Falling back to polling mode")

@@ -1724,19 +1724,45 @@ if __name__ == "__main__":
     if USE_WEBHOOK:
         logger.info("Starting bot in webhook mode")
         
-        # Set webhook
+        # Remove any existing webhook
         bot.remove_webhook()
         time.sleep(1)
         
         if WEBHOOK_URL:
-            bot.set_webhook(url=WEBHOOK_URL)
-            logger.info(f"Webhook set to: {WEBHOOK_URL}")
+            # Ensure the webhook URL ends with the token
+            webhook_url = WEBHOOK_URL.rstrip('/')
+            if not webhook_url.endswith('/' + TOKEN):
+                webhook_url += '/' + TOKEN
             
-            # Start Flask server
-            app.run(host='0.0.0.0', port=PORT, threaded=True)
+            logger.info(f"Setting webhook to: {webhook_url}")
+            
+            try:
+                # Set the webhook
+                bot.set_webhook(url=webhook_url)
+                
+                # Verify webhook was set correctly
+                webhook_info = bot.get_webhook_info()
+                logger.info(f"Webhook info: {webhook_info}")
+                
+                if webhook_info and webhook_info.url == webhook_url:
+                    logger.info("Webhook set successfully")
+                    
+                    # Start Flask server
+                    logger.info(f"Starting Flask server on port {PORT}")
+                    app.run(host='0.0.0.0', port=PORT, threaded=True)
+                else:
+                    logger.error("Failed to set webhook correctly")
+                    logger.info("Falling back to polling mode")
+                    bot.infinity_polling()
+                    
+            except Exception as e:
+                logger.error(f"Error setting webhook: {e}")
+                logger.info("Falling back to polling mode")
+                bot.infinity_polling()
         else:
             logger.error("WEBHOOK_URL not set for webhook mode")
+            logger.info("Falling back to polling mode")
+            bot.infinity_polling()
     else:
         logger.info("Starting bot in polling mode")
-        bot.remove_webhook()
         bot.infinity_polling()

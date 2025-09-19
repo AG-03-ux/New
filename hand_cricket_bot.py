@@ -1366,7 +1366,7 @@ def cmd_start(message: types.Message):
 
         ensure_user(message)
         
-        # Checkpoint 2: The user was successfully created/updated in the DB
+        # Checkpoint 2: The user was successfully processed in the DB
         logger.info(f"User {message.from_user.id} processed by ensure_user.")
         
         welcome_text = (
@@ -1389,9 +1389,9 @@ def cmd_start(message: types.Message):
         logger.info(f"--- Welcome message sent successfully to {message.chat.id} ---")
 
     except Exception as e:
-        # This will catch any error inside this function and log it
-        logger.error(f"!!! CRITICAL ERROR in cmd_start: {e} !!!", exc_info=True)
-        bot.send_message(message.chat.id, "An error occurred while starting the bot. The developer has been notified.")
+        # This will catch any error and log it
+        logger.error(f"!!! CRITICAL ERROR in cmd_start !!!", exc_info=True)
+        bot.send_message(message.chat.id, "An error occurred. The developer has been notified.")
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):

@@ -1380,8 +1380,7 @@ def ensure_user(message: types.Message):
 @bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
     try:
-        # Checkpoint 1: We entered the function
-        logger.info(f"--- /start command received from user {message.from_user.id} ---")
+        logger.info(f"!!! cmd_start called for user {message.from_user.id} !!!")
 
         ensure_user(message)
         

@@ -10,6 +10,7 @@ import requests
 import threading
 import time
 import re
+import sys
 from flask import Flask, request, jsonify
 import telebot
 from telebot import types
@@ -40,7 +41,11 @@ except (ValueError, AttributeError):
     ADMIN_IDS = []
 
 # Logging setup
-logging.basicConfig(level=LOG_LEVEL, format='[%(levelname)s] %(asctime)s - %(message)s')
+logging.basicConfig(
+    level=LOG_LEVEL, 
+    format='[%(levelname)s] %(asctime)s - %(message)s',
+    stream=sys.stdout  # <--- ADD THIS ARGUMENT
+)
 logger = logging.getLogger("cricket-bot")
 
 if not TOKEN:

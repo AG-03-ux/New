@@ -967,18 +967,19 @@ def determine_match_result(game_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: str):
     try:
-        with get_db_connection() as db:
-            # Get user_id from recent history or use a fallback method
-            user_id = None
-            
-            # Try to get from recent ball input events
-            cur = db.execute("""
-                SELECT meta FROM history 
-                WHERE chat_id=%s AND event='ball_input' 
-                ORDER BY id DESC LIMIT 1
-            """, (chat_id,))
-            
-            row = cur.fetchone()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Get user_id from recent history or use a fallback method
+                user_id = None
+                
+                # Try to get from recent ball input events
+                cur.execute("""
+                    SELECT meta FROM history 
+                    WHERE chat_id=%s AND event='ball_input' 
+                    ORDER BY id DESC LIMIT 1
+                """, (chat_id,))
+                
+                row = cur.fetchone()
             
             if row and row["meta"]:
                 try:
@@ -993,13 +994,13 @@ def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: 
                 duration_minutes = max(1, total_balls // 12)
                 
                 now = datetime.now(timezone.utc).isoformat()
-                db.execute("""
+                cur.execute("""
                     INSERT INTO match_history (
                         chat_id, user_id, match_format, player_score, bot_score,
                         player_wickets, bot_wickets, overs_played, result, margin,
                         player_strike_rate, match_duration_minutes, created_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
+                """,(
                     chat_id, user_id, g["match_format"], g["player_score"], g["bot_score"],
                     g["player_wkts"], g["bot_wkts"], 
                     g["overs_bowled"] + (g["balls_in_over"]/6.0),
@@ -1013,65 +1014,66 @@ def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: 
 
 def update_user_stats_v2(user_id: int, g: Dict[str, Any], result: str):
     try:
-        with get_db_connection() as db:
-            now = datetime.now(timezone.utc).isoformat()
-            
-            # Update win/loss/tie counts
-            if result == "win":
-                db.execute("""
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                now = datetime.now(timezone.utc).isoformat()
+                
+                # Update win/loss/tie counts
+                if result == "win":
+                    cur.execute("""
+                        UPDATE stats SET 
+                            wins = wins + 1,
+                            current_winning_streak = current_winning_streak + 1,
+                            longest_winning_streak = GREATEST(longest_winning_streak, current_winning_streak + 1)
+                        WHERE user_id = %s
+                    """, (user_id,))
+                elif result == "loss":
+                    cur.execute("""
+                        UPDATE stats SET 
+                            losses = losses + 1,
+                            current_winning_streak = 0
+                        WHERE user_id = %s
+                    """, (user_id,))
+                else:  # tie
+                    cur.execute("""
+                        UPDATE stats SET 
+                            ties = ties + 1,
+                            current_winning_streak = 0
+                        WHERE user_id = %s
+                    """, (user_id,))
+                
+                # Update other stats
+                centuries_increment = 1 if g["player_score"] >= 100 else 0
+                fifties_increment = 1 if g["player_score"] >= 50 and g["player_score"] < 100 else 0
+                ducks_increment = 1 if g["player_score"] == 0 and g["player_balls_faced"] > 0 else 0
+                
+                cur.execute("""
                     UPDATE stats SET 
-                        wins = wins + 1,
-                        current_winning_streak = current_winning_streak + 1,
-                        longest_winning_streak = MAX(longest_winning_streak, current_winning_streak + 1)
+                        games_played = games_played + 1,
+                        total_runs = total_runs + %s,
+                        total_balls_faced = total_balls_faced + %s,
+                        sixes_hit = sixes_hit + %s,
+                        fours_hit = fours_hit + %s,
+                        centuries = centuries + %s,
+                        fifties = fifties + %s,
+                        ducks = ducks + %s,
+                        high_score = GREATEST(high_score, %s),
+                        updated_at = %s
+                    WHERE user_id = %s
+                """, (
+                    g["player_score"], g["player_balls_faced"], g["player_sixes"],
+                    g["player_fours"], centuries_increment, fifties_increment, 
+                    ducks_increment, g["player_score"], now, user_id
+                ))
+                
+                # Update calculated stats
+                cur.execute("""
+                    UPDATE stats SET 
+                        avg_score = CAST(total_runs AS REAL) / NULLIF(games_played, 0),
+                        strike_rate = CAST(total_runs AS REAL) * 100.0 / NULLIF(total_balls_faced, 0)
                     WHERE user_id = %s
                 """, (user_id,))
-            elif result == "loss":
-                db.execute("""
-                    UPDATE stats SET 
-                        losses = losses + 1,
-                        current_winning_streak = 0
-                    WHERE user_id = %s
-                """, (user_id,))
-            else:  # tie
-                db.execute("""
-                    UPDATE stats SET 
-                        ties = ties + 1,
-                        current_winning_streak = 0
-                    WHERE user_id = %s
-                """, (user_id,))
-            
-            # Update other stats
-            centuries_increment = 1 if g["player_score"] >= 100 else 0
-            fifties_increment = 1 if g["player_score"] >= 50 and g["player_score"] < 100 else 0
-            ducks_increment = 1 if g["player_score"] == 0 and g["player_balls_faced"] > 0 else 0
-            
-            db.execute("""
-                UPDATE stats SET 
-                    games_played = games_played + 1,
-                    total_runs = total_runs + %s,
-                    total_balls_faced = total_balls_faced + %s,
-                    sixes_hit = sixes_hit + %s,
-                    fours_hit = fours_hit + %s,
-                    centuries = centuries + %s,
-                    fifties = fifties + %s,
-                    ducks = ducks + %s,
-                    high_score = MAX(high_score, %s),
-                    updated_at = %s
-                WHERE user_id = %s
-            """, (
-                g["player_score"], g["player_balls_faced"], g["player_sixes"],
-                g["player_fours"], centuries_increment, fifties_increment, 
-                ducks_increment, g["player_score"], now, user_id
-            ))
-            
-            # Update calculated stats
-            db.execute("""
-                UPDATE stats SET 
-                    avg_score = CAST(total_runs AS REAL) / NULLIF(games_played, 0),
-                    strike_rate = CAST(total_runs AS REAL) * 100.0 / NULLIF(total_balls_faced, 0)
-                WHERE user_id = %s
-            """, (user_id,))
-            
+                
     except Exception as e:
         logger.error(f"Error updating user stats: {e}")
 
@@ -1210,10 +1212,10 @@ def kb_forfeit_confirm() -> types.InlineKeyboardMarkup:
 # Stats functions
 def show_user_stats(chat_id: int, user_id: int):
     try:
-        with get_db_connection() as db:
-            cur = db.execute("SELECT * FROM stats WHERE user_id=%s", (user_id,))
-            stats = cur.fetchone()
-            
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM stats WHERE user_id=%s", (user_id,))
+                stats = cur.fetchone()
             if not stats or stats["games_played"] == 0:
                 bot.send_message(chat_id, "📊 No statistics yet! Play your first match with /play")
                 return
@@ -1249,26 +1251,27 @@ def show_user_stats(chat_id: int, user_id: int):
 
 def show_leaderboard(chat_id: int, category: str = "wins"):
     try:
-        with get_db_connection() as db:
-            if category == "wins":
-                query = """
-                    SELECT u.first_name, u.username, s.wins, s.games_played, s.high_score
-                    FROM stats s JOIN users u ON u.user_id = s.user_id
-                    WHERE s.games_played >= 1
-                    ORDER BY s.wins DESC, s.high_score DESC
-                    LIMIT 10
-                """
-            else:
-                query = """
-                    SELECT u.first_name, u.username, s.high_score, s.games_played, s.wins
-                    FROM stats s JOIN users u ON u.user_id = s.user_id
-                    WHERE s.games_played >= 1
-                    ORDER BY s.high_score DESC
-                    LIMIT 10
-                """
-            
-            cur = db.execute(query)
-            players = cur.fetchall()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if category == "wins":
+                    query = """
+                        SELECT u.first_name, u.username, s.wins, s.games_played, s.high_score
+                        FROM stats s JOIN users u ON u.user_id = s.user_id
+                        WHERE s.games_played >= 1
+                        ORDER BY s.wins DESC, s.high_score DESC
+                        LIMIT 10
+                    """
+                else:
+                    query = """
+                        SELECT u.first_name, u.username, s.high_score, s.games_played, s.wins
+                        FROM stats s JOIN users u ON u.user_id = s.user_id
+                        WHERE s.games_played >= 1
+                        ORDER BY s.high_score DESC
+                        LIMIT 10
+                    """
+                
+                cur.execute(query)
+                players = cur.fetchall()
             
             if not players:
                 bot.send_message(chat_id, "🏆 No players on leaderboard yet! Be the first to play!")
@@ -1297,9 +1300,10 @@ def show_leaderboard(chat_id: int, category: str = "wins"):
 
 def show_achievements(chat_id: int, user_id: int):
     try:
-        with get_db_connection() as db:
-            cur = db.execute("SELECT * FROM stats WHERE user_id=%s", (user_id,))
-            stats = cur.fetchone()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM stats WHERE user_id=%s", (user_id,))
+                stats = cur.fetchone()
             
             achievements_text = f"🏅 <b>Your Achievements</b>\n\n"
             

@@ -35,6 +35,7 @@ DEFAULT_WICKETS = int(os.getenv("DEFAULT_WICKETS", "1"))
 MAX_OVERS = 20
 MAX_WICKETS = 10
 
+
 try:
     ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 except (ValueError, AttributeError):
@@ -47,6 +48,12 @@ logging.basicConfig(
     stream=sys.stdout  # <--- ADD THIS ARGUMENT
 )
 logger = logging.getLogger("cricket-bot")
+
+logger.info("=== MODULE LOADING STARTED ===")
+logger.info(f"TOKEN present: {bool(TOKEN)}")
+logger.info(f"DATABASE_URL present: {bool(os.getenv('DATABASE_URL'))}")
+logger.info(f"USE_WEBHOOK: {USE_WEBHOOK}")
+
 
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it in your environment variables or .env file")
@@ -1786,13 +1793,20 @@ def index():
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    else:
-        return 'Invalid request', 400
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_string = request.get_data().decode('utf-8')
+            logger.info(f"Received webhook data: {json_string[:200]}...")  # Log first 200 chars
+            update = telebot.types.Update.de_json(json_string)
+            logger.info(f"Processing update: {update}")
+            bot.process_new_updates([update])
+            return '', 200
+        else:
+            logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
+            return 'Invalid request', 400
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return 'Error', 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -1800,18 +1814,20 @@ def health_check():
 
 
 # Initialize database when module loads (for Gunicorn)
+# Initialize database when module loads (for Gunicorn)
 try:
-    logger.info("Initializing database for production...")
+    logger.info("=== STARTING DATABASE INITIALIZATION ===")
     db_init()
-    logger.info("Database initialized successfully")
+    logger.info("=== DATABASE INITIALIZED SUCCESSFULLY ===")
     
     # Set webhook for production
     if WEBHOOK_URL and USE_WEBHOOK:
+        logger.info("=== SETTING WEBHOOK ===")
         webhook_url = WEBHOOK_URL.rstrip('/')
         if not webhook_url.endswith('/' + TOKEN):
             webhook_url += '/' + TOKEN
         bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook set to: {webhook_url}")
+        logger.info(f"=== WEBHOOK SET TO: {webhook_url} ===")
         
 except Exception as e:
-    logger.error(f"Critical error during initialization: {e}", exc_info=True)
+    logger.error(f"=== CRITICAL INITIALIZATION ERROR ===", exc_info=True)

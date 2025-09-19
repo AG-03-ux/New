@@ -184,27 +184,36 @@ import psycopg2.extras
 def get_db_connection():
     conn = None
     try:
-        # Get the database URL from environment variables
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
             raise ValueError("DATABASE_URL environment variable is not set")
-            
-        # Connect to the PostgreSQL database
-        conn = psycopg2.connect(db_url)
         
-        # Use a dictionary cursor to get rows as dicts (like sqlite.Row)
+        conn = psycopg2.connect(db_url)
         conn.cursor_factory = psycopg2.extras.RealDictCursor
         
         yield conn
         conn.commit()
+        logger.debug("Database transaction committed successfully")
+        
     except Exception as e:
         if conn:
             conn.rollback()
-        logger.error(f"Database error: {e}")
+            logger.error(f"Database transaction rolled back due to error: {e}")
+        logger.error(f"Database error: {e}", exc_info=True)
         raise
     finally:
         if conn:
             conn.close()
+            logger.debug("Database connection closed")
+
+
+def debug_message_handling():
+    """Add this temporarily to debug message routing"""
+    logger.info("=== MESSAGE HANDLERS REGISTERED ===")
+    for handler in bot.message_handlers:
+        logger.info(f"Handler: {handler}")
+    logger.info("=== END MESSAGE HANDLERS ===")
+
 
 def db_init():
     """Initialize database tables for PostgreSQL"""
@@ -1087,39 +1096,56 @@ def update_user_stats_v2(user_id: int, g: Dict[str, Any], result: str):
 
 def upsert_user(u: types.User):
     try:
-        with get_db_connection() as conn: # Changed variable name for clarity
-            with conn.cursor() as cur: # Use a cursor
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
                 now = datetime.now(timezone.utc).isoformat()
                 
-                # PostgreSQL compatible "upsert"
-                cur.execute("""
-                    INSERT INTO users (
-                        user_id, username, first_name, last_name, language_code, 
-                        is_premium, coins, created_at, last_active, total_messages
-                    ) VALUES (%s, %s, %s, %s, %s, %s, 100, %s, %s, 1)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        username = EXCLUDED.username,
-                        first_name = EXCLUDED.first_name,
-                        last_name = EXCLUDED.last_name,
-                        language_code = EXCLUDED.language_code,
-                        is_premium = EXCLUDED.is_premium,
-                        last_active = EXCLUDED.last_active,
-                        total_messages = users.total_messages + 1;
-                """, (
-                    u.id, u.username, u.first_name, u.last_name, 
-                    u.language_code, getattr(u, 'is_premium', False),
-                    now, now
-                ))
+                # Check if user exists first
+                cur.execute("SELECT user_id FROM users WHERE user_id = %s", (u.id,))
+                exists = cur.fetchone()
+                
+                if exists:
+                    # Update existing user
+                    cur.execute("""
+                        UPDATE users SET
+                            username = %s,
+                            first_name = %s,
+                            last_name = %s,
+                            language_code = %s,
+                            is_premium = %s,
+                            last_active = %s,
+                            total_messages = total_messages + 1
+                        WHERE user_id = %s
+                    """, (
+                        u.username, u.first_name, u.last_name, 
+                        u.language_code, getattr(u, 'is_premium', False),
+                        now, u.id
+                    ))
+                else:
+                    # Insert new user
+                    cur.execute("""
+                        INSERT INTO users (
+                            user_id, username, first_name, last_name, language_code, 
+                            is_premium, coins, created_at, last_active, total_messages
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 100, %s, %s, 1)
+                    """, (
+                        u.id, u.username, u.first_name, u.last_name, 
+                        u.language_code, getattr(u, 'is_premium', False),
+                        now, now
+                    ))
                 
                 # Ensure stats record exists
-                cur.execute("""
-                    INSERT INTO stats (user_id, created_at, updated_at) 
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id) DO NOTHING;
-                """, (u.id, now, now))
+                cur.execute("SELECT user_id FROM stats WHERE user_id = %s", (u.id,))
+                if not cur.fetchone():
+                    cur.execute("""
+                        INSERT INTO stats (user_id, created_at, updated_at) 
+                        VALUES (%s, %s, %s)
+                    """, (u.id, now, now))
+                
+                logger.info(f"User {u.id} upserted successfully")
                 
     except Exception as e:
-        logger.error(f"Error upserting user: {e}")
+        logger.error(f"Error upserting user {u.id}: {e}", exc_info=True)
 
 # Keyboard definitions
 def kb_main_menu() -> types.InlineKeyboardMarkup:
@@ -1374,19 +1400,19 @@ def show_achievements(chat_id: int, user_id: int):
 
 def ensure_user(message: types.Message):
     if message.from_user:
-        upsert_user(message.from_user)
+        try:
+            upsert_user(message.from_user)
+        except Exception as e:
+            logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
+            # Don't crash the command - continue anyway
 
 # Command handlers
 @bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
     try:
         logger.info(f"!!! cmd_start called for user {message.from_user.id} !!!")
-        # Checkpoint 1: We entered the function
-        logger.info(f"--- /start command received from user {message.from_user.id} ---")
-
-        ensure_user(message)
         
-        # Checkpoint 2: The user was successfully processed in the DB
+        ensure_user(message)
         logger.info(f"User {message.from_user.id} processed by ensure_user.")
         
         welcome_text = (
@@ -1400,24 +1426,19 @@ def cmd_start(message: types.Message):
             f"Ready to play some cricket?"
         )
         
-        # Checkpoint 3: We are about to send the welcome message
         logger.info(f"Attempting to send welcome message to chat {message.chat.id}.")
 
-        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-
-        # Checkpoint 4: The message was sent successfully
-        logger.info(f"--- Welcome message sent successfully to {message.chat.id} ---")
+        # Add more specific error handling here
+        result = bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
+        logger.info(f"Welcome message sent successfully. Message ID: {result.message_id}")
 
     except Exception as e:
-        # This will catch any error and log it
         logger.error(f"!!! CRITICAL ERROR in cmd_start !!!", exc_info=True)
-        bot.send_message(message.chat.id, "An error occurred. The developer has been notified.")
-
-
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message: types.Message):
-    logger.info(f"Unhandled message: {message.text} from user {message.from_user.id}")
-
+        try:
+            # Fallback simple message
+            bot.send_message(message.chat.id, "Welcome to Cricket Bot! Use /play to start a match.")
+        except Exception as e2:
+            logger.error(f"Even fallback message failed: {e2}")
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):
@@ -1757,6 +1778,9 @@ def handle_toss_result(chat_id: int, user_choice: str, user_id: int):
         logger.error(f"Error handling toss result: {e}")
         bot.send_message(chat_id, "❌ Error with toss. Please try /play again.")
 
+
+
+
 # Cricket animations
 def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
     """Send cricket-related animations with fallback to emojis"""
@@ -1787,6 +1811,8 @@ def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
     
     return False
 
+
+
 # Flask app for webhook mode
 app = Flask(__name__)
 
@@ -1803,21 +1829,67 @@ def webhook():
     try:
         if request.headers.get('content-type') == 'application/json':
             json_string = request.get_data().decode('utf-8')
-            logger.info(f"Received webhook data: {json_string[:200]}...")  # Log first 200 chars
+            logger.info(f"Received webhook data: {json_string[:200]}...")
+            
             update = telebot.types.Update.de_json(json_string)
-            logger.info(f"Processing update: {update}")
+            logger.info(f"Processing update ID: {update.update_id}")
+            
+            # Process the update
             bot.process_new_updates([update])
+            
+            logger.info(f"Update {update.update_id} processed successfully")
             return '', 200
         else:
             logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
             return 'Invalid request', 400
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
-        return 'Error', 500
+        return 'Error processing update', 500
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
+
+
+@app.route('/test', methods=['GET'])
+def test_bot():
+    try:
+        # Test database connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                db_ok = True
+    except Exception as e:
+        logger.error(f"Database test failed: {e}")
+        db_ok = False
+    
+    # Test bot info
+    try:
+        bot_info = bot.get_me()
+        bot_ok = True
+    except Exception as e:
+        logger.error(f"Bot test failed: {e}")
+        bot_ok = False
+    
+    return {
+        'status': 'ok' if (db_ok and bot_ok) else 'error',
+        'database': 'ok' if db_ok else 'error',
+        'bot': 'ok' if bot_ok else 'error',
+        'webhook_url': WEBHOOK_URL if USE_WEBHOOK else 'polling'
+    }, 200
+
+
+
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message: types.Message):
+    logger.info(f"Unhandled message: '{message.text}' from user {message.from_user.id}")
+    try:
+        ensure_user(message)
+        bot.send_message(message.chat.id, "I didn't understand that. Use /help for available commands.")
+    except Exception as e:
+        logger.error(f"Error in catch-all handler: {e}")
+
 
 
 # Initialize database when module loads (for Gunicorn)

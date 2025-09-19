@@ -1381,6 +1381,8 @@ def ensure_user(message: types.Message):
 def cmd_start(message: types.Message):
     try:
         logger.info(f"!!! cmd_start called for user {message.from_user.id} !!!")
+        # Checkpoint 1: We entered the function
+        logger.info(f"--- /start command received from user {message.from_user.id} ---")
 
         ensure_user(message)
         
@@ -1410,6 +1412,12 @@ def cmd_start(message: types.Message):
         # This will catch any error and log it
         logger.error(f"!!! CRITICAL ERROR in cmd_start !!!", exc_info=True)
         bot.send_message(message.chat.id, "An error occurred. The developer has been notified.")
+
+
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message: types.Message):
+    logger.info(f"Unhandled message: {message.text} from user {message.from_user.id}")
+
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):

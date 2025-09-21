@@ -61,6 +61,18 @@ if not TOKEN:
 # Initialize Bot
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
 
+@bot.middleware_handler(update_types=['message'])
+def debug_middleware(bot_instance, message):
+    logger.info(f"=== MESSAGE MIDDLEWARE DEBUG ===")
+    logger.info(f"Message text: {message.text}")
+    logger.info(f"Message from user: {message.from_user.id}")
+    logger.info(f"Message type: {message.content_type}")
+    logger.info(f"Total handlers registered: {len(bot.message_handlers)}")
+    
+    # Log which handler will process this
+    for i, handler in enumerate(bot.message_handlers):
+        logger.info(f"Handler {i}: {handler.function.__name__ if hasattr(handler, 'function') else 'unknown'}")
+
 # Store user session data temporarily
 user_sessions = {}
 
@@ -1243,6 +1255,7 @@ def kb_forfeit_confirm() -> types.InlineKeyboardMarkup:
     )
     return kb
 
+
 # Stats functions
 def show_user_stats(chat_id: int, user_id: int):
     try:
@@ -1406,9 +1419,21 @@ def ensure_user(message: types.Message):
             logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
             # Don't crash the command - continue anyway
 
+
+@bot.message_handler(func=lambda message: True)
+def debug_all_messages(message: types.Message):
+    logger.info(f"DEBUG: Received message '{message.text}' from {message.from_user.id}")
+    if message.text == "/start":
+        logger.info("DEBUG: This is a /start command - should be handled by cmd_start")
+    return False  # Don't actually handle the message, let it continue to other handlers
+
+
 # Command handlers
 @bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
+    logger.info(f"=== START COMMAND HANDLER REACHED ===")
+    logger.info(f"Message: {message.text}")
+    logger.info(f"User: {message.from_user.id}")
     try:
         logger.info(f"!!! cmd_start called for user {message.from_user.id} !!!")
         
@@ -1881,19 +1906,6 @@ def test_bot():
 
 
 
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message: types.Message):
-    logger.info(f"Unhandled message: '{message.text}' from user {message.from_user.id}")
-    try:
-        ensure_user(message)
-        bot.send_message(message.chat.id, "I didn't understand that. Use /help for available commands.")
-    except Exception as e:
-        logger.error(f"Error in catch-all handler: {e}")
-
-
-
-# Initialize database when module loads (for Gunicorn)
-# Initialize database when module loads (for Gunicorn)
 try:
     logger.info("=== STARTING DATABASE INITIALIZATION ===")
     db_init()
@@ -1910,3 +1922,17 @@ try:
         
 except Exception as e:
     logger.error(f"=== CRITICAL INITIALIZATION ERROR ===", exc_info=True)
+
+
+# Add this right after your bot initialization
+@bot.middleware_handler(update_types=['message'])
+def debug_middleware(bot_instance, message):
+    logger.info(f"=== MESSAGE MIDDLEWARE DEBUG ===")
+    logger.info(f"Message text: {message.text}")
+    logger.info(f"Message from user: {message.from_user.id}")
+    logger.info(f"Message type: {message.content_type}")
+    logger.info(f"Total handlers registered: {len(bot.message_handlers)}")
+    
+    # Log which handler will process this
+    for i, handler in enumerate(bot.message_handlers):
+        logger.info(f"Handler {i}: {handler.function.__name__ if hasattr(handler, 'function') else 'unknown'}")

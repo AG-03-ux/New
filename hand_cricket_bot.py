@@ -61,17 +61,12 @@ if not TOKEN:
 # Initialize Bot
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
 
-@bot.middleware_handler(update_types=['message'])
-def debug_middleware(bot_instance, message):
-    logger.info(f"=== MESSAGE MIDDLEWARE DEBUG ===")
-    logger.info(f"Message text: {message.text}")
-    logger.info(f"Message from user: {message.from_user.id}")
-    logger.info(f"Message type: {message.content_type}")
-    logger.info(f"Total handlers registered: {len(bot.message_handlers)}")
-    
-    # Log which handler will process this
-    for i, handler in enumerate(bot.message_handlers):
-        logger.info(f"Handler {i}: {handler.function.__name__ if hasattr(handler, 'function') else 'unknown'}")
+@bot.message_handler(func=lambda message: message.text == "/start")
+def debug_start_handler(message: types.Message):
+    logger.info(f"=== DEBUG START HANDLER TRIGGERED ===")
+    logger.info(f"Message: {message.text}")
+    logger.info(f"User: {message.from_user.id}")
+    logger.info(f"This handler caught /start - checking if cmd_start will also run...")
 
 # Store user session data temporarily
 user_sessions = {}

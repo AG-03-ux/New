@@ -1918,16 +1918,3 @@ try:
 except Exception as e:
     logger.error(f"=== CRITICAL INITIALIZATION ERROR ===", exc_info=True)
 
-
-# Add this right after your bot initialization
-@bot.middleware_handler(update_types=['message'])
-def debug_middleware(bot_instance, message):
-    logger.info(f"=== MESSAGE MIDDLEWARE DEBUG ===")
-    logger.info(f"Message text: {message.text}")
-    logger.info(f"Message from user: {message.from_user.id}")
-    logger.info(f"Message type: {message.content_type}")
-    logger.info(f"Total handlers registered: {len(bot.message_handlers)}")
-    
-    # Log which handler will process this
-    for i, handler in enumerate(bot.message_handlers):
-        logger.info(f"Handler {i}: {handler.function.__name__ if hasattr(handler, 'function') else 'unknown'}")

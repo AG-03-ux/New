@@ -35,7 +35,6 @@ DEFAULT_WICKETS = int(os.getenv("DEFAULT_WICKETS", "1"))
 MAX_OVERS = 20
 MAX_WICKETS = 10
 
-
 try:
     ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 except (ValueError, AttributeError):
@@ -45,22 +44,19 @@ except (ValueError, AttributeError):
 logging.basicConfig(
     level=LOG_LEVEL, 
     format='[%(levelname)s] %(asctime)s - %(message)s',
-    stream=sys.stdout  # <--- ADD THIS ARGUMENT
+    stream=sys.stdout
 )
 logger = logging.getLogger("cricket-bot")
 
 logger.info("=== MODULE LOADING STARTED ===")
 logger.info(f"TOKEN present: {bool(TOKEN)}")
-logger.info(f"DATABASE_URL present: {bool(os.getenv('DATABASE_URL'))}")
 logger.info(f"USE_WEBHOOK: {USE_WEBHOOK}")
-
 
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it in your environment variables or .env file")
 
 # Initialize Bot
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
-
 
 # Store user session data temporarily
 user_sessions = {}
@@ -176,21 +172,24 @@ def rate_limit_check(action_type: str = 'default'):
         return wrapper
     return decorator
 
-# Database Connection
-# NEW Database Connection function for PostgreSQL
-import psycopg2
-import psycopg2.extras
-
+# Database Connection - Choose one based on your environment
 @contextmanager
 def get_db_connection():
+    """Database connection - handles both SQLite and PostgreSQL"""
     conn = None
     try:
+        # Check if DATABASE_URL exists (for PostgreSQL/Heroku)
         db_url = os.getenv("DATABASE_URL")
-        if not db_url:
-            raise ValueError("DATABASE_URL environment variable is not set")
-        
-        conn = psycopg2.connect(db_url)
-        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        if db_url:
+            # PostgreSQL connection
+            import psycopg2
+            import psycopg2.extras
+            conn = psycopg2.connect(db_url)
+            conn.cursor_factory = psycopg2.extras.RealDictCursor
+        else:
+            # SQLite connection (local development)
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
         
         yield conn
         conn.commit()
@@ -207,108 +206,113 @@ def get_db_connection():
             conn.close()
             logger.debug("Database connection closed")
 
-
-def debug_message_handling():
-    """Add this temporarily to debug message routing"""
-    logger.info("=== MESSAGE HANDLERS REGISTERED ===")
-    for handler in bot.message_handlers:
-        logger.info(f"Handler: {handler}")
-    logger.info("=== END MESSAGE HANDLERS ===")
-
-
 def db_init():
-    """Initialize database tables for PostgreSQL"""
+    """Initialize database tables - compatible with both SQLite and PostgreSQL"""
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:  # Create a cursor to execute commands
-                # Users table
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        user_id BIGINT PRIMARY KEY,
-                        username TEXT,
-                        first_name TEXT,
-                        last_name TEXT,
-                        language_code TEXT,
-                        is_premium BOOLEAN DEFAULT FALSE,
-                        coins INTEGER DEFAULT 100,
-                        created_at TEXT,
-                        last_active TEXT,
-                        total_messages INTEGER DEFAULT 0,
-                        favorite_format TEXT DEFAULT '2,1'
-                    )
-                """)
-                
-                # Stats table
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS stats (
-                        user_id BIGINT PRIMARY KEY,
-                        games_played INTEGER DEFAULT 0,
-                        wins INTEGER DEFAULT 0,
-                        losses INTEGER DEFAULT 0,
-                        ties INTEGER DEFAULT 0,
-                        high_score INTEGER DEFAULT 0,
-                        total_runs INTEGER DEFAULT 0,
-                        total_balls_faced INTEGER DEFAULT 0,
-                        sixes_hit INTEGER DEFAULT 0,
-                        fours_hit INTEGER DEFAULT 0,
-                        ducks INTEGER DEFAULT 0,
-                        centuries INTEGER DEFAULT 0,
-                        fifties INTEGER DEFAULT 0,
-                        hat_tricks INTEGER DEFAULT 0,
-                        longest_winning_streak INTEGER DEFAULT 0,
-                        current_winning_streak INTEGER DEFAULT 0,
-                        avg_score REAL DEFAULT 0.0,
-                        strike_rate REAL DEFAULT 0.0,
-                        tournaments_played INTEGER DEFAULT 0,
-                        tournaments_won INTEGER DEFAULT 0,
-                        tournament_points INTEGER DEFAULT 0,
-                        created_at TEXT,
-                        updated_at TEXT
-                    )
-                """)
-                
-                # Games table
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS games (
-                        chat_id BIGINT PRIMARY KEY,
-                        state TEXT,
-                        innings INTEGER,
-                        batting TEXT,
-                        player_score INTEGER DEFAULT 0,
-                        bot_score INTEGER DEFAULT 0,
-                        player_wkts INTEGER DEFAULT 0,
-                        bot_wkts INTEGER DEFAULT 0,
-                        balls_in_over INTEGER DEFAULT 0,
-                        overs_bowled INTEGER DEFAULT 0,
-                        target INTEGER,
-                        overs_limit INTEGER DEFAULT 2,
-                        wickets_limit INTEGER DEFAULT 1,
-                        match_format TEXT,
-                        difficulty_level TEXT,
-                        player_balls_faced INTEGER DEFAULT 0,
-                        bot_balls_faced INTEGER DEFAULT 0,
-                        player_fours INTEGER DEFAULT 0,
-                        player_sixes INTEGER DEFAULT 0,
-                        bot_fours INTEGER DEFAULT 0,
-                        bot_sixes INTEGER DEFAULT 0,
-                        extras INTEGER DEFAULT 0,
-                        powerplay_overs INTEGER DEFAULT 0,
-                        is_powerplay BOOLEAN DEFAULT FALSE,
-                        weather_condition TEXT,
-                        pitch_condition TEXT,
-                        tournament_id INTEGER,
-                        tournament_round INTEGER,
-                        opponent_id BIGINT,
-                        is_tournament_match BOOLEAN DEFAULT FALSE,
-                        created_at TEXT,
-                        updated_at TEXT
-                    )
-                """)
-                
-                # Match history (Using SERIAL for auto-incrementing ID)
+            cur = conn.cursor()
+            
+            # Determine database type
+            db_url = os.getenv("DATABASE_URL")
+            is_postgres = bool(db_url)
+            
+            # Use appropriate data types and syntax
+            if is_postgres:
+                bigint_type = "BIGINT"
+                autoincrement = "SERIAL"
+            else:
+                bigint_type = "INTEGER"
+                autoincrement = "INTEGER PRIMARY KEY AUTOINCREMENT"
+            
+            # Users table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id {bigint_type} PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    language_code TEXT,
+                    is_premium BOOLEAN DEFAULT FALSE,
+                    coins INTEGER DEFAULT 100,
+                    created_at TEXT,
+                    last_active TEXT,
+                    total_messages INTEGER DEFAULT 0,
+                    favorite_format TEXT DEFAULT '2,1'
+                )
+            """)
+            
+            # Stats table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS stats (
+                    user_id {bigint_type} PRIMARY KEY,
+                    games_played INTEGER DEFAULT 0,
+                    wins INTEGER DEFAULT 0,
+                    losses INTEGER DEFAULT 0,
+                    ties INTEGER DEFAULT 0,
+                    high_score INTEGER DEFAULT 0,
+                    total_runs INTEGER DEFAULT 0,
+                    total_balls_faced INTEGER DEFAULT 0,
+                    sixes_hit INTEGER DEFAULT 0,
+                    fours_hit INTEGER DEFAULT 0,
+                    ducks INTEGER DEFAULT 0,
+                    centuries INTEGER DEFAULT 0,
+                    fifties INTEGER DEFAULT 0,
+                    hat_tricks INTEGER DEFAULT 0,
+                    longest_winning_streak INTEGER DEFAULT 0,
+                    current_winning_streak INTEGER DEFAULT 0,
+                    avg_score REAL DEFAULT 0.0,
+                    strike_rate REAL DEFAULT 0.0,
+                    tournaments_played INTEGER DEFAULT 0,
+                    tournaments_won INTEGER DEFAULT 0,
+                    tournament_points INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            
+            # Games table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS games (
+                    chat_id {bigint_type} PRIMARY KEY,
+                    state TEXT,
+                    innings INTEGER,
+                    batting TEXT,
+                    player_score INTEGER DEFAULT 0,
+                    bot_score INTEGER DEFAULT 0,
+                    player_wkts INTEGER DEFAULT 0,
+                    bot_wkts INTEGER DEFAULT 0,
+                    balls_in_over INTEGER DEFAULT 0,
+                    overs_bowled INTEGER DEFAULT 0,
+                    target INTEGER,
+                    overs_limit INTEGER DEFAULT 2,
+                    wickets_limit INTEGER DEFAULT 1,
+                    match_format TEXT,
+                    difficulty_level TEXT,
+                    player_balls_faced INTEGER DEFAULT 0,
+                    bot_balls_faced INTEGER DEFAULT 0,
+                    player_fours INTEGER DEFAULT 0,
+                    player_sixes INTEGER DEFAULT 0,
+                    bot_fours INTEGER DEFAULT 0,
+                    bot_sixes INTEGER DEFAULT 0,
+                    extras INTEGER DEFAULT 0,
+                    powerplay_overs INTEGER DEFAULT 0,
+                    is_powerplay BOOLEAN DEFAULT FALSE,
+                    weather_condition TEXT,
+                    pitch_condition TEXT,
+                    tournament_id INTEGER,
+                    tournament_round INTEGER,
+                    opponent_id {bigint_type},
+                    is_tournament_match BOOLEAN DEFAULT FALSE,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            
+            # Match history
+            if is_postgres:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS match_history (
-                        id SERIAL PRIMARY KEY, 
+                        id SERIAL PRIMARY KEY,
                         chat_id BIGINT,
                         user_id BIGINT,
                         match_format TEXT,
@@ -325,12 +329,43 @@ def db_init():
                         FOREIGN KEY (user_id) REFERENCES users (user_id)
                     )
                 """)
-                
-                # History/Events table (Using SERIAL for auto-incrementing ID)
+            else:
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS match_history (
+                        id {autoincrement},
+                        chat_id INTEGER,
+                        user_id INTEGER,
+                        match_format TEXT,
+                        player_score INTEGER,
+                        bot_score INTEGER,
+                        player_wickets INTEGER,
+                        bot_wickets INTEGER,
+                        overs_played REAL,
+                        result TEXT,
+                        margin TEXT,
+                        player_strike_rate REAL,
+                        match_duration_minutes INTEGER,
+                        created_at TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users (user_id)
+                    )
+                """)
+            
+            # History/Events table
+            if is_postgres:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS history (
                         id SERIAL PRIMARY KEY,
                         chat_id BIGINT,
+                        event TEXT,
+                        meta TEXT,
+                        created_at TEXT
+                    )
+                """)
+            else:
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS history (
+                        id {autoincrement},
+                        chat_id INTEGER,
                         event TEXT,
                         meta TEXT,
                         created_at TEXT
@@ -343,16 +378,20 @@ def db_init():
         logger.error(f"Error initializing database: {e}")
         raise
 
-# You can remove the extra db_init() call you added here.
-# The main call before the app starts is the correct one.
-
 def log_event(chat_id: int, event: str, meta: str = ""):
     """Log events safely"""
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
+            cur = conn.cursor()
+            # Use appropriate parameter style based on database type
+            if os.getenv("DATABASE_URL"):  # PostgreSQL
                 cur.execute(
                     "INSERT INTO history (chat_id, event, meta, created_at) VALUES (%s, %s, %s, %s)",
+                    (chat_id, event, meta, datetime.now(timezone.utc).isoformat())
+                )
+            else:  # SQLite
+                cur.execute(
+                    "INSERT INTO history (chat_id, event, meta, created_at) VALUES (?, ?, ?, ?)",
                     (chat_id, event, meta, datetime.now(timezone.utc).isoformat())
                 )
     except Exception as e:
@@ -408,13 +447,17 @@ class GameState:
     def _load_or_create(self) -> Dict[str, Any]:
         try:
             with get_db_connection() as conn:
-                with conn.cursor() as cur:
+                cur = conn.cursor()
+                # Use appropriate parameter style based on database type
+                if os.getenv("DATABASE_URL"):  # PostgreSQL
                     cur.execute("SELECT * FROM games WHERE chat_id = %s", (self.chat_id,))
-                    row = cur.fetchone()
-                    if row:
-                        return dict(row)
-                    else:
-                        return self._create_default_game()
+                else:  # SQLite
+                    cur.execute("SELECT * FROM games WHERE chat_id = ?", (self.chat_id,))
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+                else:
+                    return self._create_default_game()
         except Exception as e:
             logger.error(f"Error loading game state: {e}")
             return self._create_default_game()
@@ -425,10 +468,13 @@ class GameState:
     def save(self) -> bool:
         try:
             with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    self.data['updated_at'] = datetime.now(timezone.utc).isoformat()
-                    
-                    # PostgreSQL compatible "upsert" for the games table
+                cur = conn.cursor()
+                self.data['updated_at'] = datetime.now(timezone.utc).isoformat()
+                
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                
+                if is_postgres:
+                    # PostgreSQL upsert
                     cur.execute("""
                         INSERT INTO games (
                             chat_id, state, innings, batting, player_score, bot_score,
@@ -473,37 +519,80 @@ class GameState:
                             tournament_round = EXCLUDED.tournament_round,
                             opponent_id = EXCLUDED.opponent_id,
                             is_tournament_match = EXCLUDED.is_tournament_match,
-                            updated_at = EXCLUDED.updated_at;
-                    """, (
-                        self.chat_id, self.data.get("state"), self.data.get("innings"),
-                        self.data.get("batting"), self.data.get("player_score", 0),
-                        self.data.get("bot_score", 0), self.data.get("player_wkts", 0),
-                        self.data.get("bot_wkts", 0), self.data.get("balls_in_over", 0),
-                        self.data.get("overs_bowled", 0), self.data.get("target"),
-                        self.data.get("overs_limit", 2), self.data.get("wickets_limit", 1),
-                        self.data.get("match_format", "T2"), self.data.get("difficulty_level", "medium"),
-                        self.data.get("player_balls_faced", 0), self.data.get("bot_balls_faced", 0),
-                        self.data.get("player_fours", 0), self.data.get("player_sixes", 0),
-                        self.data.get("bot_fours", 0), self.data.get("bot_sixes", 0),
-                        self.data.get("extras", 0), self.data.get("powerplay_overs", 0),
-                        self.data.get("is_powerplay", False), self.data.get("weather_condition", "clear"),
-                        self.data.get("pitch_condition", "normal"), self.data.get("tournament_id"),
-                        self.data.get("tournament_round"), self.data.get("opponent_id"),
-                        self.data.get("is_tournament_match", False),
-                        self.data.get("created_at", datetime.now(timezone.utc).isoformat()),
-                        self.data['updated_at']
-                    ))
-                    return True
+                            updated_at = EXCLUDED.updated_at
+                    """, tuple(self.data.get(k) for k in [
+                        'chat_id', 'state', 'innings', 'batting', 'player_score', 'bot_score',
+                        'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
+                        'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
+                        'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
+                        'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
+                        'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
+                        'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
+                    ]))
+                else:
+                    # SQLite upsert
+                    cur.execute("SELECT chat_id FROM games WHERE chat_id = ?", (self.chat_id,))
+                    if cur.fetchone():
+                        # Update existing record
+                        cur.execute("""
+                            UPDATE games SET 
+                                state=?, innings=?, batting=?, player_score=?, bot_score=?,
+                                player_wkts=?, bot_wkts=?, balls_in_over=?, overs_bowled=?, 
+                                target=?, overs_limit=?, wickets_limit=?, match_format=?, 
+                                difficulty_level=?, player_balls_faced=?, bot_balls_faced=?,
+                                player_fours=?, player_sixes=?, bot_fours=?, bot_sixes=?,
+                                extras=?, powerplay_overs=?, is_powerplay=?, weather_condition=?,
+                                pitch_condition=?, tournament_id=?, tournament_round=?, 
+                                opponent_id=?, is_tournament_match=?, updated_at=?
+                            WHERE chat_id=?
+                        """, tuple(self.data.get(k) for k in [
+                            'state', 'innings', 'batting', 'player_score', 'bot_score',
+                            'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
+                            'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
+                            'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
+                            'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
+                            'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
+                            'opponent_id', 'is_tournament_match', 'updated_at'
+                        ]) + (self.chat_id,))
+                    else:
+                        # Insert new record
+                        cur.execute("""
+                            INSERT INTO games (
+                                chat_id, state, innings, batting, player_score, bot_score,
+                                player_wkts, bot_wkts, balls_in_over, overs_bowled, target,
+                                overs_limit, wickets_limit, match_format, difficulty_level,
+                                player_balls_faced, bot_balls_faced, player_fours, player_sixes,
+                                bot_fours, bot_sixes, extras, powerplay_overs, is_powerplay,
+                                weather_condition, pitch_condition, tournament_id, tournament_round,
+                                opponent_id, is_tournament_match, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            self.chat_id,
+                            *tuple(self.data.get(k) for k in [
+                                'state', 'innings', 'batting', 'player_score', 'bot_score',
+                                'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
+                                'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
+                                'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
+                                'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
+                                'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
+                                'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
+                            ])
+                        ))
+                return True
         except Exception as e:
             logger.error(f"Failed to save game state: {e}")
             return False
-    
+        
     def delete(self) -> bool:
         try:
             with get_db_connection() as conn:
-                with conn.cursor() as cur:
+                cur = conn.cursor()
+                if os.getenv("DATABASE_URL"):  # PostgreSQL
                     cur.execute("DELETE FROM games WHERE chat_id = %s", (self.chat_id,))
-                    return True
+                else:  # SQLite
+                    cur.execute("DELETE FROM games WHERE chat_id = ?", (self.chat_id,))
+                return True
         except Exception as e:
             logger.error(f"Failed to delete game: {e}")
             return False
@@ -537,7 +626,7 @@ def delete_game(chat_id: int):
         logger.error(f"Error deleting game: {e}")
 
 def safe_start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
-                    difficulty: str = "medium", user_id: int = None):
+                       difficulty: str = "medium", user_id: int = None):
     try:
         g = default_game(overs, wickets, difficulty)
         safe_save_game(chat_id, g)
@@ -611,7 +700,7 @@ def calculate_bot_move(g: Dict[str, Any], user_value: int) -> int:
     return bot_choice
 
 def get_commentary(g: Dict[str, Any], user_value: int, bot_value: int, 
-                runs_scored: int, is_wicket: bool) -> str:
+                  runs_scored: int, is_wicket: bool) -> str:
     if is_wicket:
         wicket_comments = [
             f"💥 BOWLED! What a delivery! {user_value} meets {bot_value}",
@@ -989,35 +1078,60 @@ def determine_match_result(game_data: Dict[str, Any]) -> Dict[str, Any]:
 def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: str):
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                # Get user_id from recent history
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            # Get user_id from recent history
+            if is_postgres:
                 cur.execute("""
                     SELECT meta FROM history 
                     WHERE chat_id=%s AND event='ball_input' 
                     ORDER BY id DESC LIMIT 1
                 """, (chat_id,))
+            else:
+                cur.execute("""
+                    SELECT meta FROM history 
+                    WHERE chat_id=? AND event='ball_input' 
+                    ORDER BY id DESC LIMIT 1
+                """, (chat_id,))
+            
+            row = cur.fetchone()
+            user_id = None
+            
+            if row and row["meta"]:
+                try:
+                    parts = dict(kv.split("=") for kv in row["meta"].split() if "=" in kv)
+                    user_id = int(parts.get("from", "0"))
+                except:
+                    pass
+            
+            if user_id and user_id > 0:
+                total_balls = g["player_balls_faced"] + g["bot_balls_faced"]
+                duration_minutes = max(1, total_balls // 12)
+                now = datetime.now(timezone.utc).isoformat()
                 
-                row = cur.fetchone()
-                user_id = None
-                
-                if row and row["meta"]:
-                    try:
-                        parts = dict(kv.split("=") for kv in row["meta"].split() if "=" in kv)
-                        user_id = int(parts.get("from", "0"))
-                    except:
-                        pass
-                
-                if user_id and user_id > 0:
-                    total_balls = g["player_balls_faced"] + g["bot_balls_faced"]
-                    duration_minutes = max(1, total_balls // 12)
-                    now = datetime.now(timezone.utc).isoformat()
-                    
+                if is_postgres:
                     cur.execute("""
                         INSERT INTO match_history (
                             chat_id, user_id, match_format, player_score, bot_score,
                             player_wickets, bot_wickets, overs_played, result, margin,
                             player_strike_rate, match_duration_minutes, created_at
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        chat_id, user_id, g["match_format"], g["player_score"], g["bot_score"],
+                        g["player_wkts"], g["bot_wkts"], 
+                        g["overs_bowled"] + (g["balls_in_over"]/6.0),
+                        result, margin,
+                        (g["player_score"]/max(g["player_balls_faced"], 1)*100),
+                        duration_minutes, now
+                    ))
+                else:
+                    cur.execute("""
+                        INSERT INTO match_history (
+                            chat_id, user_id, match_format, player_score, bot_score,
+                            player_wickets, bot_wickets, overs_played, result, margin,
+                            player_strike_rate, match_duration_minutes, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         chat_id, user_id, g["match_format"], g["player_score"], g["bot_score"],
                         g["player_wkts"], g["bot_wkts"], 
@@ -1033,11 +1147,13 @@ def save_match_history_v2(chat_id: int, g: Dict[str, Any], result: str, margin: 
 def update_user_stats_v2(user_id: int, g: Dict[str, Any], result: str):
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                now = datetime.now(timezone.utc).isoformat()
-                
-                # Update win/loss/tie counts
-                if result == "win":
+            cur = conn.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            # Update win/loss/tie counts
+            if result == "win":
+                if is_postgres:
                     cur.execute("""
                         UPDATE stats SET 
                             wins = wins + 1,
@@ -1045,26 +1161,39 @@ def update_user_stats_v2(user_id: int, g: Dict[str, Any], result: str):
                             longest_winning_streak = GREATEST(longest_winning_streak, current_winning_streak + 1)
                         WHERE user_id = %s
                     """, (user_id,))
-                elif result == "loss":
+                else:
                     cur.execute("""
                         UPDATE stats SET 
-                            losses = losses + 1,
-                            current_winning_streak = 0
-                        WHERE user_id = %s
+                            wins = wins + 1,
+                            current_winning_streak = current_winning_streak + 1,
+                            longest_winning_streak = MAX(longest_winning_streak, current_winning_streak + 1)
+                        WHERE user_id = ?
                     """, (user_id,))
-                else:  # tie
-                    cur.execute("""
-                        UPDATE stats SET 
-                            ties = ties + 1,
-                            current_winning_streak = 0
-                        WHERE user_id = %s
-                    """, (user_id,))
-                
-                # Update other stats
-                centuries_increment = 1 if g["player_score"] >= 100 else 0
-                fifties_increment = 1 if g["player_score"] >= 50 and g["player_score"] < 100 else 0
-                ducks_increment = 1 if g["player_score"] == 0 and g["player_balls_faced"] > 0 else 0
-                
+            elif result == "loss":
+                param = (user_id,) if is_postgres else (user_id,)
+                param_style = "%s" if is_postgres else "?"
+                cur.execute(f"""
+                    UPDATE stats SET 
+                        losses = losses + 1,
+                        current_winning_streak = 0
+                    WHERE user_id = {param_style}
+                """, param)
+            else:  # tie
+                param = (user_id,) if is_postgres else (user_id,)
+                param_style = "%s" if is_postgres else "?"
+                cur.execute(f"""
+                    UPDATE stats SET 
+                        ties = ties + 1,
+                        current_winning_streak = 0
+                    WHERE user_id = {param_style}
+                """, param)
+            
+            # Update other stats
+            centuries_increment = 1 if g["player_score"] >= 100 else 0
+            fifties_increment = 1 if g["player_score"] >= 50 and g["player_score"] < 100 else 0
+            ducks_increment = 1 if g["player_score"] == 0 and g["player_balls_faced"] > 0 else 0
+            
+            if is_postgres:
                 cur.execute("""
                     UPDATE stats SET 
                         games_played = games_played + 1,
@@ -1083,30 +1212,53 @@ def update_user_stats_v2(user_id: int, g: Dict[str, Any], result: str):
                     g["player_fours"], centuries_increment, fifties_increment, 
                     ducks_increment, g["player_score"], now, user_id
                 ))
-                
-                # Update calculated stats
+            else:
                 cur.execute("""
                     UPDATE stats SET 
-                        avg_score = CAST(total_runs AS REAL) / NULLIF(games_played, 0),
-                        strike_rate = CAST(total_runs AS REAL) * 100.0 / NULLIF(total_balls_faced, 0)
-                    WHERE user_id = %s
-                """, (user_id,))
-                
+                        games_played = games_played + 1,
+                        total_runs = total_runs + ?,
+                        total_balls_faced = total_balls_faced + ?,
+                        sixes_hit = sixes_hit + ?,
+                        fours_hit = fours_hit + ?,
+                        centuries = centuries + ?,
+                        fifties = fifties + ?,
+                        ducks = ducks + ?,
+                        high_score = MAX(high_score, ?),
+                        updated_at = ?
+                    WHERE user_id = ?
+                """, (
+                    g["player_score"], g["player_balls_faced"], g["player_sixes"],
+                    g["player_fours"], centuries_increment, fifties_increment, 
+                    ducks_increment, g["player_score"], now, user_id
+                ))
+            
+            # Update calculated stats
+            param_style = "%s" if is_postgres else "?"
+            cur.execute(f"""
+                UPDATE stats SET 
+                    avg_score = CAST(total_runs AS REAL) / NULLIF(games_played, 0),
+                    strike_rate = CAST(total_runs AS REAL) * 100.0 / NULLIF(total_balls_faced, 0)
+                WHERE user_id = {param_style}
+            """, (user_id,))
+            
     except Exception as e:
         logger.error(f"Error updating user stats: {e}")
 
 def upsert_user(u: types.User):
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                now = datetime.now(timezone.utc).isoformat()
-                
-                # Check if user exists first
-                cur.execute("SELECT user_id FROM users WHERE user_id = %s", (u.id,))
-                exists = cur.fetchone()
-                
-                if exists:
-                    # Update existing user
+            cur = conn.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            # Check if user exists first
+            param_style = "%s" if is_postgres else "?"
+            cur.execute(f"SELECT user_id FROM users WHERE user_id = {param_style}", (u.id,))
+            exists = cur.fetchone()
+            
+            if exists:
+                # Update existing user
+                if is_postgres:
                     cur.execute("""
                         UPDATE users SET
                             username = %s,
@@ -1123,7 +1275,24 @@ def upsert_user(u: types.User):
                         now, u.id
                     ))
                 else:
-                    # Insert new user
+                    cur.execute("""
+                        UPDATE users SET
+                            username = ?,
+                            first_name = ?,
+                            last_name = ?,
+                            language_code = ?,
+                            is_premium = ?,
+                            last_active = ?,
+                            total_messages = total_messages + 1
+                        WHERE user_id = ?
+                    """, (
+                        u.username, u.first_name, u.last_name, 
+                        u.language_code, getattr(u, 'is_premium', False),
+                        now, u.id
+                    ))
+            else:
+                # Insert new user
+                if is_postgres:
                     cur.execute("""
                         INSERT INTO users (
                             user_id, username, first_name, last_name, language_code, 
@@ -1134,17 +1303,34 @@ def upsert_user(u: types.User):
                         u.language_code, getattr(u, 'is_premium', False),
                         now, now
                     ))
-                
-                # Ensure stats record exists
-                cur.execute("SELECT user_id FROM stats WHERE user_id = %s", (u.id,))
-                if not cur.fetchone():
+                else:
+                    cur.execute("""
+                        INSERT INTO users (
+                            user_id, username, first_name, last_name, language_code, 
+                            is_premium, coins, created_at, last_active, total_messages
+                        ) VALUES (?, ?, ?, ?, ?, ?, 100, ?, ?, 1)
+                    """, (
+                        u.id, u.username, u.first_name, u.last_name, 
+                        u.language_code, getattr(u, 'is_premium', False),
+                        now, now
+                    ))
+            
+            # Ensure stats record exists
+            cur.execute(f"SELECT user_id FROM stats WHERE user_id = {param_style}", (u.id,))
+            if not cur.fetchone():
+                if is_postgres:
                     cur.execute("""
                         INSERT INTO stats (user_id, created_at, updated_at) 
                         VALUES (%s, %s, %s)
                     """, (u.id, now, now))
-                
-                logger.info(f"User {u.id} upserted successfully")
-                
+                else:
+                    cur.execute("""
+                        INSERT INTO stats (user_id, created_at, updated_at) 
+                        VALUES (?, ?, ?)
+                    """, (u.id, now, now))
+            
+            logger.info(f"User {u.id} upserted successfully")
+            
     except Exception as e:
         logger.error(f"Error upserting user {u.id}: {e}", exc_info=True)
 
@@ -1244,14 +1430,16 @@ def kb_forfeit_confirm() -> types.InlineKeyboardMarkup:
     )
     return kb
 
-
 # Stats functions
 def show_user_stats(chat_id: int, user_id: int):
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM stats WHERE user_id=%s", (user_id,))
-                stats = cur.fetchone()
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"SELECT * FROM stats WHERE user_id={param_style}", (user_id,))
+            stats = cur.fetchone()
             if not stats or stats["games_played"] == 0:
                 bot.send_message(chat_id, "📊 No statistics yet! Play your first match with /play")
                 return
@@ -1288,26 +1476,28 @@ def show_user_stats(chat_id: int, user_id: int):
 def show_leaderboard(chat_id: int, category: str = "wins"):
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                if category == "wins":
-                    query = """
-                        SELECT u.first_name, u.username, s.wins, s.games_played, s.high_score
-                        FROM stats s JOIN users u ON u.user_id = s.user_id
-                        WHERE s.games_played >= 1
-                        ORDER BY s.wins DESC, s.high_score DESC
-                        LIMIT 10
-                    """
-                else:
-                    query = """
-                        SELECT u.first_name, u.username, s.high_score, s.games_played, s.wins
-                        FROM stats s JOIN users u ON u.user_id = s.user_id
-                        WHERE s.games_played >= 1
-                        ORDER BY s.high_score DESC
-                        LIMIT 10
-                    """
-                
-                cur.execute(query)
-                players = cur.fetchall()
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if category == "wins":
+                query = """
+                    SELECT u.first_name, u.username, s.wins, s.games_played, s.high_score
+                    FROM stats s JOIN users u ON u.user_id = s.user_id
+                    WHERE s.games_played >= 1
+                    ORDER BY s.wins DESC, s.high_score DESC
+                    LIMIT 10
+                """
+            else:
+                query = """
+                    SELECT u.first_name, u.username, s.high_score, s.games_played, s.wins
+                    FROM stats s JOIN users u ON u.user_id = s.user_id
+                    WHERE s.games_played >= 1
+                    ORDER BY s.high_score DESC
+                    LIMIT 10
+                """
+            
+            cur.execute(query)
+            players = cur.fetchall()
             
             if not players:
                 bot.send_message(chat_id, "🏆 No players on leaderboard yet! Be the first to play!")
@@ -1337,65 +1527,67 @@ def show_leaderboard(chat_id: int, category: str = "wins"):
 def show_achievements(chat_id: int, user_id: int):
     try:
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM stats WHERE user_id=%s", (user_id,))
-                stats = cur.fetchone()
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            achievements_text = f"🏅 <b>Your Achievements</b>\n\n"
-            
-            if not stats:
-                achievements_text += "Play matches to unlock achievements!"
-                bot.send_message(chat_id, achievements_text)
-                return
-            
-            # Check achievements
-            unlocked = []
-            locked = []
-            
-            # First Victory
-            if stats["wins"] >= 1:
-                unlocked.append("🏆 First Victory - Win your first match")
-            else:
-                locked.append("🔒 First Victory - Win your first match")
-            
-            # Century Maker
-            if stats["centuries"] >= 1:
-                unlocked.append("💯 Century Maker - Score 100+ runs")
-            else:
-                locked.append("🔒 Century Maker - Score 100+ runs")
-                
-            # Consistent Player
-            if stats["longest_winning_streak"] >= 5:
-                unlocked.append("🔥 Consistent Player - Win 5 matches in a row")
-            else:
-                locked.append("🔒 Consistent Player - Win 5 matches in a row")
-                
-            # Big Hitter
-            if stats["sixes_hit"] >= 50:
-                unlocked.append("🚀 Big Hitter - Hit 50 sixes")
-            else:
-                locked.append("🔒 Big Hitter - Hit 50 sixes")
-                
-            # Experience Player
-            if stats["games_played"] >= 10:
-                unlocked.append("🎮 Experienced Player - Play 10 matches")
-            else:
-                locked.append("🔒 Experienced Player - Play 10 matches")
-            
-            if unlocked:
-                achievements_text += "<b>Unlocked:</b>\n"
-                for achievement in unlocked:
-                    achievements_text += f"✅ {achievement}\n"
-                achievements_text += "\n"
-
-            if locked:
-                achievements_text += "<b>Locked:</b>\n"
-                for achievement in locked:
-                    achievements_text += f"{achievement}\n"
-
+            cur.execute(f"SELECT * FROM stats WHERE user_id={param_style}", (user_id,))
+            stats = cur.fetchone()
+        
+        achievements_text = f"🏅 <b>Your Achievements</b>\n\n"
+        
+        if not stats:
+            achievements_text += "Play matches to unlock achievements!"
             bot.send_message(chat_id, achievements_text)
+            return
+        
+        # Check achievements
+        unlocked = []
+        locked = []
+        
+        # First Victory
+        if stats["wins"] >= 1:
+            unlocked.append("🏆 First Victory - Win your first match")
+        else:
+            locked.append("🔒 First Victory - Win your first match")
+        
+        # Century Maker
+        if stats["centuries"] >= 1:
+            unlocked.append("💯 Century Maker - Score 100+ runs")
+        else:
+            locked.append("🔒 Century Maker - Score 100+ runs")
             
+        # Consistent Player
+        if stats["longest_winning_streak"] >= 5:
+            unlocked.append("🔥 Consistent Player - Win 5 matches in a row")
+        else:
+            locked.append("🔒 Consistent Player - Win 5 matches in a row")
             
+        # Big Hitter
+        if stats["sixes_hit"] >= 50:
+            unlocked.append("🚀 Big Hitter - Hit 50 sixes")
+        else:
+            locked.append("🔒 Big Hitter - Hit 50 sixes")
+            
+        # Experience Player
+        if stats["games_played"] >= 10:
+            unlocked.append("🎮 Experienced Player - Play 10 matches")
+        else:
+            locked.append("🔒 Experienced Player - Play 10 matches")
+        
+        if unlocked:
+            achievements_text += "<b>Unlocked:</b>\n"
+            for achievement in unlocked:
+                achievements_text += f"✅ {achievement}\n"
+            achievements_text += "\n"
+
+        if locked:
+            achievements_text += "<b>Locked:</b>\n"
+            for achievement in locked:
+                achievements_text += f"{achievement}\n"
+
+        bot.send_message(chat_id, achievements_text)
+        
     except Exception as e:
         logger.error(f"Error showing achievements: {e}")
         bot.send_message(chat_id, "❌ Error loading achievements. Please try again.")
@@ -1406,8 +1598,26 @@ def ensure_user(message: types.Message):
             upsert_user(message.from_user)
         except Exception as e:
             logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
-            # Don't crash the command - continue anyway
 
+# Message handlers
+@bot.message_handler(commands=['start'])
+def cmd_start(message: types.Message):
+    try:
+        ensure_user(message)
+        welcome_text = (
+            f"🏏 <b>Welcome to Cricket Bot, {message.from_user.first_name}!</b>\n\n"
+            f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
+            f"✨ <b>Features:</b>\n"
+            f"• 🎯 Multiple game formats (T1 to T20)\n"
+            f"• 🤖 Smart AI opponents\n" 
+            f"• 📊 Detailed statistics\n"
+            f"• 🎬 Live commentary\n\n"
+            f"Ready to play some cricket?"
+        )
+        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+        bot.send_message(message.chat.id, "Welcome to Cricket Bot!")
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):
@@ -1510,7 +1720,6 @@ def handle_ball_input(message: types.Message):
         elif isinstance(result, dict) and result.get('match_ended', True):
             # Match ended, result contains the match result
             bot.send_message(message.chat.id, result['commentary'])
-            # The end_innings_or_match_v2 function handles sending the final result
             
         else:
             bot.send_message(message.chat.id, result)
@@ -1518,7 +1727,7 @@ def handle_ball_input(message: types.Message):
         logger.error(f"Error handling ball input: {e}")
         bot.send_message(message.chat.id, "❌ Error processing your move. Please try again.")
 
-@bot.message_handler(func=lambda message: message.text and "📊" in message.text.lower())
+@bot.message_handler(func=lambda message: message.text and "📊" in message.text)
 def handle_score_request(message: types.Message):
     try:
         ensure_user(message)
@@ -1531,7 +1740,7 @@ def handle_score_request(message: types.Message):
         logger.error(f"Error handling score request: {e}")
         bot.send_message(message.chat.id, "❌ Error loading score.")
 
-@bot.message_handler(func=lambda message: message.text and "🏳️" in message.text.lower())
+@bot.message_handler(func=lambda message: message.text and "🏳️" in message.text)
 def handle_forfeit_request(message: types.Message):
     try:
         ensure_user(message)
@@ -1747,9 +1956,6 @@ def handle_toss_result(chat_id: int, user_choice: str, user_id: int):
         logger.error(f"Error handling toss result: {e}")
         bot.send_message(chat_id, "❌ Error with toss. Please try /play again.")
 
-
-
-
 # Cricket animations
 def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
     """Send cricket-related animations with fallback to emojis"""
@@ -1780,18 +1986,12 @@ def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
     
     return False
 
-
-
 # Flask app for webhook mode
 app = Flask(__name__)
 
-
-
 @app.route('/')
 def index():
-    # You can return a simple message to confirm the app is running
     return "<h1>Cricket Bot is alive!</h1><p>Webhook is ready for Telegram updates.</p>", 200
-
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -1803,7 +2003,6 @@ def webhook():
             update = telebot.types.Update.de_json(json_string)
             logger.info(f"Processing update ID: {update.update_id}")
             
-            # ADD THESE DEBUG LINES:
             if update.message:
                 logger.info(f"Message in update: '{update.message.text}' from user {update.message.from_user.id}")
             else:
@@ -1821,20 +2020,18 @@ def webhook():
         logger.error(f"Webhook error: {e}", exc_info=True)
         return 'Error processing update', 500
 
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
-
 
 @app.route('/test', methods=['GET'])
 def test_bot():
     try:
         # Test database connection
         with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                db_ok = True
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            db_ok = True
     except Exception as e:
         logger.error(f"Database test failed: {e}")
         db_ok = False
@@ -1854,8 +2051,7 @@ def test_bot():
         'webhook_url': WEBHOOK_URL if USE_WEBHOOK else 'polling'
     }, 200
 
-
-
+# Initialize for gunicorn and direct execution
 try:
     logger.info("=== STARTING DATABASE INITIALIZATION ===")
     db_init()
@@ -1873,3 +2069,20 @@ try:
 except Exception as e:
     logger.error(f"=== CRITICAL INITIALIZATION ERROR ===", exc_info=True)
 
+# Main execution
+if __name__ == "__main__":
+    try:
+        if USE_WEBHOOK and WEBHOOK_URL:
+            logger.info("Starting Flask app for webhook mode...")
+            app.run(host="0.0.0.0", port=PORT, debug=False)
+        else:
+            logger.info("Starting bot in polling mode...")
+            # Remove webhook if it exists
+            bot.remove_webhook()
+            logger.info("Webhook removed, starting polling...")
+            bot.infinity_polling(none_stop=True, timeout=60)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)

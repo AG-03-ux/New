@@ -1,1 +1,1 @@
-web: python hand_cricket_bot.py
+gunicorn --config gunicorn_config.py hand_cricket_bot:app

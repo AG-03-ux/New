@@ -1,6 +1,6 @@
-pyTelegramBotAPI
-requests
-python-dotenv
+python-telegram-bot-api
+telebot
 flask
-gunicorn
+python-dotenv
 psycopg2-binary
+requests

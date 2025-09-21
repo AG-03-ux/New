@@ -61,6 +61,21 @@ if not TOKEN:
 # Initialize Bot
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
 
+# IMMEDIATE DEBUG TEST - ADD THIS:
+logger.info(f"=== BOT HANDLERS DEBUG ===")
+logger.info(f"Message handlers count: {len(bot.message_handlers)}")
+logger.info(f"Callback handlers count: {len(bot.callback_query_handlers)}")
+
+# Simple test handler - ADD THIS TOO:
+@bot.message_handler(func=lambda message: True)
+def immediate_test_handler(message: types.Message):
+    logger.error(f"IMMEDIATE TEST: Got message '{message.text}' from user {message.from_user.id}")
+    if message.text == "/start":
+        try:
+            bot.send_message(message.chat.id, "TEST: I can send messages! Your handlers should work.")
+        except Exception as e:
+            logger.error(f"Failed to send test message: {e}")
+
 @bot.message_handler(func=lambda message: message.text == "/start")
 def debug_start_handler(message: types.Message):
     logger.info(f"=== DEBUG START HANDLER TRIGGERED ===")
@@ -1853,6 +1868,12 @@ def webhook():
             
             update = telebot.types.Update.de_json(json_string)
             logger.info(f"Processing update ID: {update.update_id}")
+            
+            # ADD THESE DEBUG LINES:
+            if update.message:
+                logger.info(f"Message in update: '{update.message.text}' from user {update.message.from_user.id}")
+            else:
+                logger.info("No message in update")
             
             # Process the update
             bot.process_new_updates([update])

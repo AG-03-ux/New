@@ -61,27 +61,6 @@ if not TOKEN:
 # Initialize Bot
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
 
-# IMMEDIATE DEBUG TEST - ADD THIS:
-logger.info(f"=== BOT HANDLERS DEBUG ===")
-logger.info(f"Message handlers count: {len(bot.message_handlers)}")
-logger.info(f"Callback handlers count: {len(bot.callback_query_handlers)}")
-
-# Simple test handler - ADD THIS TOO:
-@bot.message_handler(func=lambda message: True)
-def immediate_test_handler(message: types.Message):
-    logger.error(f"IMMEDIATE TEST: Got message '{message.text}' from user {message.from_user.id}")
-    if message.text == "/start":
-        try:
-            bot.send_message(message.chat.id, "TEST: I can send messages! Your handlers should work.")
-        except Exception as e:
-            logger.error(f"Failed to send test message: {e}")
-
-@bot.message_handler(func=lambda message: message.text == "/start")
-def debug_start_handler(message: types.Message):
-    logger.info(f"=== DEBUG START HANDLER TRIGGERED ===")
-    logger.info(f"Message: {message.text}")
-    logger.info(f"User: {message.from_user.id}")
-    logger.info(f"This handler caught /start - checking if cmd_start will also run...")
 
 # Store user session data temporarily
 user_sessions = {}
@@ -558,7 +537,7 @@ def delete_game(chat_id: int):
         logger.error(f"Error deleting game: {e}")
 
 def safe_start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
-                       difficulty: str = "medium", user_id: int = None):
+                    difficulty: str = "medium", user_id: int = None):
     try:
         g = default_game(overs, wickets, difficulty)
         safe_save_game(chat_id, g)
@@ -632,7 +611,7 @@ def calculate_bot_move(g: Dict[str, Any], user_value: int) -> int:
     return bot_choice
 
 def get_commentary(g: Dict[str, Any], user_value: int, bot_value: int, 
-                  runs_scored: int, is_wicket: bool) -> str:
+                runs_scored: int, is_wicket: bool) -> str:
     if is_wicket:
         wicket_comments = [
             f"💥 BOWLED! What a delivery! {user_value} meets {bot_value}",
@@ -1429,51 +1408,6 @@ def ensure_user(message: types.Message):
             logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
             # Don't crash the command - continue anyway
 
-
-@bot.message_handler(func=lambda message: True)
-def debug_all_messages(message: types.Message):
-    logger.info(f"DEBUG: Received message '{message.text}' from {message.from_user.id}")
-    if message.text == "/start":
-        logger.info("DEBUG: This is a /start command - should be handled by cmd_start")
-    return False  # Don't actually handle the message, let it continue to other handlers
-
-
-# Command handlers
-@bot.message_handler(commands=["start"])
-def cmd_start(message: types.Message):
-    logger.info(f"=== START COMMAND HANDLER REACHED ===")
-    logger.info(f"Message: {message.text}")
-    logger.info(f"User: {message.from_user.id}")
-    try:
-        logger.info(f"!!! cmd_start called for user {message.from_user.id} !!!")
-        
-        ensure_user(message)
-        logger.info(f"User {message.from_user.id} processed by ensure_user.")
-        
-        welcome_text = (
-            f"🏏 <b>Welcome to Cricket Bot, {message.from_user.first_name}!</b>\n\n"
-            f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
-            f"✨ <b>Features:</b>\n"
-            f"• 🎯 Multiple game formats (T1 to T20)\n"
-            f"• 🤖 Smart AI opponents\n" 
-            f"• 📊 Detailed statistics\n"
-            f"• 🎬 Live commentary\n\n"
-            f"Ready to play some cricket?"
-        )
-        
-        logger.info(f"Attempting to send welcome message to chat {message.chat.id}.")
-
-        # Add more specific error handling here
-        result = bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-        logger.info(f"Welcome message sent successfully. Message ID: {result.message_id}")
-
-    except Exception as e:
-        logger.error(f"!!! CRITICAL ERROR in cmd_start !!!", exc_info=True)
-        try:
-            # Fallback simple message
-            bot.send_message(message.chat.id, "Welcome to Cricket Bot! Use /play to start a match.")
-        except Exception as e2:
-            logger.error(f"Even fallback message failed: {e2}")
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):

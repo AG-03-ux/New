@@ -397,7 +397,7 @@ def log_event(chat_id: int, event: str, meta: str = ""):
     except Exception as e:
         logger.error(f"Error logging event: {e}")
 
-def default_game(overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
+def default_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
                 difficulty: str = "medium") -> Dict[str, Any]:
     """Create default game state"""
     overs = max(1, min(overs, MAX_OVERS))
@@ -405,6 +405,7 @@ def default_game(overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS,
     powerplay = min(6, max(1, overs // 4)) if overs > 2 else 0
     
     return {
+        "chat_id": chat_id,  # Add this line
         "state": "toss",
         "innings": 1,
         "batting": None,
@@ -438,6 +439,7 @@ def default_game(overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+
 # Game State Management
 class GameState:
     def __init__(self, chat_id: int):
@@ -455,7 +457,9 @@ class GameState:
                     cur.execute("SELECT * FROM games WHERE chat_id = ?", (self.chat_id,))
                 row = cur.fetchone()
                 if row:
-                    return dict(row)
+                    game_data = dict(row)
+                    game_data['chat_id'] = self.chat_id  # Ensure chat_id is set
+                    return game_data
                 else:
                     return self._create_default_game()
         except Exception as e:
@@ -463,15 +467,56 @@ class GameState:
             return self._create_default_game()
     
     def _create_default_game(self) -> Dict[str, Any]:
-        return default_game()
+        return default_game(self.chat_id)  # Pass chat_id to default_game
     
     def save(self) -> bool:
         try:
             with get_db_connection() as conn:
                 cur = conn.cursor()
                 self.data['updated_at'] = datetime.now(timezone.utc).isoformat()
+                self.data['chat_id'] = self.chat_id  # Ensure chat_id is always set
                 
                 is_postgres = bool(os.getenv("DATABASE_URL"))
+                
+                # Ensure all required fields have default values
+                default_values = {
+                    'state': 'toss',
+                    'innings': 1,
+                    'batting': None,
+                    'player_score': 0,
+                    'bot_score': 0,
+                    'player_wkts': 0,
+                    'bot_wkts': 0,
+                    'balls_in_over': 0,
+                    'overs_bowled': 0,
+                    'target': None,
+                    'overs_limit': DEFAULT_OVERS,
+                    'wickets_limit': DEFAULT_WICKETS,
+                    'match_format': 'T2',
+                    'difficulty_level': 'medium',
+                    'player_balls_faced': 0,
+                    'bot_balls_faced': 0,
+                    'player_fours': 0,
+                    'player_sixes': 0,
+                    'bot_fours': 0,
+                    'bot_sixes': 0,
+                    'extras': 0,
+                    'powerplay_overs': 0,
+                    'is_powerplay': False,
+                    'weather_condition': 'clear',
+                    'pitch_condition': 'normal',
+                    'tournament_id': None,
+                    'tournament_round': None,
+                    'opponent_id': None,
+                    'is_tournament_match': False,
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }
+                
+                # Apply defaults for missing values
+                for key, default_val in default_values.items():
+                    if key not in self.data or self.data[key] is None:
+                        self.data[key] = default_val
                 
                 if is_postgres:
                     # PostgreSQL upsert
@@ -530,7 +575,7 @@ class GameState:
                         'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
                     ]))
                 else:
-                    # SQLite upsert
+                    # SQLite upsert - Check if record exists first
                     cur.execute("SELECT chat_id FROM games WHERE chat_id = ?", (self.chat_id,))
                     if cur.fetchone():
                         # Update existing record
@@ -628,7 +673,7 @@ def delete_game(chat_id: int):
 def safe_start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAULT_WICKETS, 
                        difficulty: str = "medium", user_id: int = None):
     try:
-        g = default_game(overs, wickets, difficulty)
+        g = default_game(chat_id, overs, wickets, difficulty)  # Pass chat_id
         safe_save_game(chat_id, g)
         
         weather = WEATHER_CONDITIONS.get(g.get("weather_condition", "clear"), {"description": "Clear skies"})
@@ -760,13 +805,19 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
         return "Please send a number between 1 and 6"
     
     try:
+        # Log the ball input event
+        log_event(chat_id, "ball_input", f"user={user_value} from={user_id}")
+        
         game_state = GameState(chat_id)
+        logger.info(f"Game state loaded for chat {chat_id}: state={game_state.data.get('state', 'unknown')}")
         
         if game_state.data['state'] != 'play':
+            logger.warning(f"Game state is '{game_state.data['state']}' instead of 'play' for chat {chat_id}")
             return "No active match found. Use /play to start a new match."
         
         # Calculate bot move
         bot_value = calculate_bot_move(game_state.data, user_value)
+        logger.debug(f"User: {user_value}, Bot: {bot_value}")
         
         # Update balls count
         game_state.update(balls_in_over=game_state.data['balls_in_over'] + 1)
@@ -820,7 +871,8 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
         
         # Save game state
         if not game_state.save():
-            logger.error("Failed to save game state")
+            logger.error("Failed to save game state - this could cause state inconsistency")
+            return "Error saving game state. Please try again."
         
         # Check if innings/match ends
         if check_innings_end(game_state.data):
@@ -847,7 +899,7 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
         }
         
     except Exception as e:
-        logger.error(f"Error processing ball: {e}")
+        logger.error(f"Error processing ball for chat {chat_id}, user {user_id}: {e}", exc_info=True)
         return "An error occurred while processing your move. Please try again."
 
 def show_live_score(chat_id: int, g: Dict[str, Any], detailed: bool = True):

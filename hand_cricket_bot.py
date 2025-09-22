@@ -509,59 +509,122 @@ def db_init():
                 """)
                 
             # Tournament table
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS tournaments (
-                    id {autoincrement},
-                    name TEXT,
-                    theme TEXT,
-                    type TEXT,
-                    status TEXT,
-                    entry_fee INTEGER,
-                    prize_pool INTEGER,
-                    creator_id {bigint_type},
-                    created_at TEXT,
-                    updated_at TEXT
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournaments (
+                        id SERIAL PRIMARY KEY,
+                        name TEXT,
+                        theme TEXT,
+                        type TEXT,
+                        status TEXT,
+                        entry_fee INTEGER,
+                        prize_pool INTEGER,
+                        creator_id BIGINT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournaments (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT,
+                        theme TEXT,
+                        type TEXT,
+                        status TEXT,
+                        entry_fee INTEGER,
+                        prize_pool INTEGER,
+                        creator_id INTEGER,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+            
             # Tournament participants
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS tournament_players (
-                    id {autoincrement},
-                    tournament_id INTEGER,
-                    user_id {bigint_type},
-                    registered_at TEXT,
-                    coins_paid INTEGER,
-                    status TEXT,
-                    FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
-                    FOREIGN KEY (user_id) REFERENCES users(user_id)
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournament_players (
+                        id SERIAL PRIMARY KEY,
+                        tournament_id INTEGER,
+                        user_id BIGINT,
+                        registered_at TEXT,
+                        coins_paid INTEGER,
+                        status TEXT,
+                        FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
+                        FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournament_players (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tournament_id INTEGER,
+                        user_id INTEGER,
+                        registered_at TEXT,
+                        coins_paid INTEGER,
+                        status TEXT,
+                        FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
+                        FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    )
+                """)
+            
             # Tournament matches
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS tournament_matches (
-                    id {autoincrement},
-                    tournament_id INTEGER,
-                    round INTEGER,
-                    player1_id {bigint_type},
-                    player2_id {bigint_type},
-                    winner_id {bigint_type},
-                    match_state TEXT,
-                    match_data TEXT,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournament_matches (
+                        id SERIAL PRIMARY KEY,
+                        tournament_id INTEGER,
+                        round INTEGER,
+                        player1_id BIGINT,
+                        player2_id BIGINT,
+                        winner_id BIGINT,
+                        match_state TEXT,
+                        match_data TEXT,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournament_matches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tournament_id INTEGER,
+                        round INTEGER,
+                        player1_id INTEGER,
+                        player2_id INTEGER,
+                        winner_id INTEGER,
+                        match_state TEXT,
+                        match_data TEXT,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
+                    )
+                """)
+            
             # Tournament history
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS tournament_history (
-                    id {autoincrement},
-                    tournament_id INTEGER,
-                    event TEXT,
-                    meta TEXT,
-                    created_at TEXT
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournament_history (
+                        id SERIAL PRIMARY KEY,
+                        tournament_id INTEGER,
+                        event TEXT,
+                        meta TEXT,
+                        created_at TEXT,
+                        FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tournament_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tournament_id INTEGER,
+                        event TEXT,
+                        meta TEXT,
+                        created_at TEXT,
+                        FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
+                    )
+                """)
             # Daily challenges
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS daily_challenges (
@@ -2526,6 +2589,56 @@ def cmd_leaderboard(message: types.Message):
     except Exception as e:
         logger.error(f"Error in leaderboard command: {e}")
         bot.send_message(message.chat.id, "❌ Error loading leaderboard.")
+
+# Handle ball input (1-6) with enhanced GIF animations
+@bot.message_handler(func=lambda message: message.text and message.text.isdigit() and 1 <= int(message.text) <= 6)
+def handle_ball_input(message: types.Message):
+    try:
+        ensure_user(message)
+        user_value = int(message.text)
+        result = enhanced_process_ball_v2(message.chat.id, user_value, message.from_user.id)
+        
+        if isinstance(result, str):
+            bot.send_message(message.chat.id, result)
+        else:
+            # Enhanced GIF animations based on result
+            gif_sent = False
+            
+            # Try to send appropriate GIF first
+            if result['runs_scored'] == 6:
+                gif_sent = send_gif_with_fallback(message.chat.id, "six", result['commentary'])
+            elif result['runs_scored'] == 4:
+                gif_sent = send_gif_with_fallback(message.chat.id, "four", result['commentary'])
+            elif result['is_wicket']:
+                gif_sent = send_gif_with_fallback(message.chat.id, "wicket", result['commentary'])
+            
+            # If no GIF was sent, send text commentary
+            if not gif_sent:
+                bot.send_message(message.chat.id, result['commentary'])
+            
+            # Check for century celebration
+            if result['game_state']['batting'] == 'player' and result['game_state']['player_score'] >= 100:
+                prev_score = result['game_state']['player_score'] - result['runs_scored']
+                if prev_score < 100:  # Just reached century
+                    century_text = f"🎉 CENTURY! What an incredible knock! {result['game_state']['player_score']} runs!"
+                    send_gif_with_fallback(message.chat.id, "century", century_text)
+            
+            # Send over completion message if needed
+            if result['over_completed']:
+                over_summary = f"📊 End of Over {result['game_state']['overs_bowled']}\n"
+                if result['game_state']['batting'] == 'player':
+                    over_summary += f"Your Score: {result['game_state']['player_score']}/{result['game_state']['player_wkts']}"
+                else:
+                    over_summary += f"Bot Score: {result['game_state']['bot_score']}/{result['game_state']['bot_wkts']}"
+                bot.send_message(message.chat.id, over_summary)
+            
+            # Send powerplay end message if needed
+            if result['powerplay_ended']:
+                bot.send_message(message.chat.id, "⚡ Powerplay Over! Field restrictions lifted.")
+                
+    except Exception as e:
+        logger.error(f"Error handling ball input: {e}")
+        bot.send_message(message.chat.id, "❌ Error processing your move. Please try again.")
 
 # Background task to create daily challenges
 def create_daily_challenges_task():

@@ -19,6 +19,8 @@ from enum import Enum
 from collections import defaultdict, deque
 import uuid
 from functools import wraps
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables first
 load_dotenv()
@@ -110,6 +112,140 @@ PITCH_CONDITIONS = {
     "bowling": {"description": "Bowler-friendly pitch", "batting_bonus": 0.8, "bowling_bonus": 1.2},
     "turning": {"description": "Spin-friendly pitch", "batting_bonus": 0.9, "bowling_bonus": 1.1}
 }
+
+# Enhanced GIF URLs for animations with priority system
+CRICKET_GIFS = {
+    "six": [
+        "https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExdGZ2dzVjNXFmMHVxbmYwbHBqZzZqbnZoc3J0MTJxM3lqejZhcjN1aiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/1wqqlaQ7T4J0aI548K/giphy.gif",
+        "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExM3N2aWFmeWNzdzRmbjNnMzRkZ3V5bzJ2ZmdybnQ0bGR2cG5yNmRrayZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/iIGy2K38b2gXC/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif"
+    ],
+    "four": [
+        "https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExZjBqYTl6N2ZpNTN2bm1xNHNocWFpcXRiZGV6ZzVqb3NjcjB2a3oyOSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/U67BigGk1pfTW/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif"
+    ],
+    "wicket": [
+        "https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExaWN0b2l0aWxscDVuY3Q3c3VmaHI2aXlmbGNuMnZqcmZpa2JmMnl6MSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/LpdlqT1z0Jv4k/giphy.gif",
+        "https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExZ2Y0NHE4NjZidjhkb25uY3g2MWdwaHdzZnV3aXZsNnprcTNzZWVwNiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/2wZfMDb005M9W/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif"
+    ],
+    "tournament_win": [
+        "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExMnU2cmI0ZTV0MTJpYTA0ajEzbXk2bnNocW5wYXJjaTlzcDd0NjE0MyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/3oEhn6803hZ36dSY2A/giphy.gif",
+        "https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif"
+    ],
+    "century": [
+        "https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif"
+    ],
+    "celebration": [
+        "https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+        "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif"
+    ],
+    "tournament_start": [
+        "https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif"
+    ]
+}
+
+# Tournament themes with specific configurations
+TOURNAMENT_THEMES = {
+    "world_cup": {
+        "name": "🏆 Cricket World Cup",
+        "description": "The ultimate cricket championship",
+        "emoji": "🏆",
+        "min_players": 4,
+        "max_players": 16,
+        "entry_multiplier": 2.0
+    },
+    "ipl": {
+        "name": "🏏 IPL Championship", 
+        "description": "Indian Premier League style tournament",
+        "emoji": "🏏",
+        "min_players": 4,
+        "max_players": 8,
+        "entry_multiplier": 1.5
+    },
+    "ashes": {
+        "name": "🔥 The Ashes",
+        "description": "Historic rivalry tournament",
+        "emoji": "🔥", 
+        "min_players": 2,
+        "max_players": 8,
+        "entry_multiplier": 1.8
+    },
+    "champions_trophy": {
+        "name": "🏅 Champions Trophy",
+        "description": "Elite players championship",
+        "emoji": "🏅",
+        "min_players": 4,
+        "max_players": 8,
+        "entry_multiplier": 2.2
+    },
+    "t20_blast": {
+        "name": "⚡ T20 Blast",
+        "description": "Fast-paced T20 tournament",
+        "emoji": "⚡",
+        "min_players": 4,
+        "max_players": 16,
+        "entry_multiplier": 1.3
+    }
+}
+
+# Daily challenge types
+CHALLENGE_TYPES = {
+    "score_runs": {
+        "name": "Score Master",
+        "description": "Score {target}+ runs in a single match",
+        "targets": [30, 50, 75, 100],
+        "base_reward": 50,
+        "xp_reward": 25
+    },
+    "hit_sixes": {
+        "name": "Big Hitter", 
+        "description": "Hit {target} sixes in a single match",
+        "targets": [3, 5, 8, 10],
+        "base_reward": 40,
+        "xp_reward": 20
+    },
+    "win_matches": {
+        "name": "Victory Streak",
+        "description": "Win {target} matches in a row",
+        "targets": [2, 3, 5, 7],
+        "base_reward": 75,
+        "xp_reward": 35
+    },
+    "play_tournament": {
+        "name": "Tournament Player",
+        "description": "Participate in {target} tournament matches",
+        "targets": [1, 3, 5, 10],
+        "base_reward": 100,
+        "xp_reward": 50
+    }
+}
+
+# XP and level system
+XP_LEVELS = {
+    1: 0, 2: 100, 3: 250, 4: 450, 5: 700, 6: 1000, 7: 1350, 8: 1750, 9: 2200, 10: 2700,
+    11: 3250, 12: 3850, 13: 4500, 14: 5200, 15: 5950, 16: 6750, 17: 7600, 18: 8500, 19: 9450, 20: 10500
+}
+
+def get_level_from_xp(xp: int) -> int:
+    """Calculate user level from XP"""
+    for level in range(20, 0, -1):
+        if xp >= XP_LEVELS[level]:
+            return level
+    return 1
+
+def get_xp_for_next_level(current_xp: int) -> int:
+    """Get XP needed for next level"""
+    current_level = get_level_from_xp(current_xp)
+    if current_level >= 20:
+        return 0
+    return XP_LEVELS[current_level + 1] - current_xp
 
 # Rate Limiter
 class RateLimiter:
@@ -372,7 +508,98 @@ def db_init():
                     )
                 """)
                 
-        logger.info("Database tables initialized successfully")
+            # Tournament table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS tournaments (
+                    id {autoincrement},
+                    name TEXT,
+                    theme TEXT,
+                    type TEXT,
+                    status TEXT,
+                    entry_fee INTEGER,
+                    prize_pool INTEGER,
+                    creator_id {bigint_type},
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            # Tournament participants
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS tournament_players (
+                    id {autoincrement},
+                    tournament_id INTEGER,
+                    user_id {bigint_type},
+                    registered_at TEXT,
+                    coins_paid INTEGER,
+                    status TEXT,
+                    FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            """)
+            # Tournament matches
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS tournament_matches (
+                    id {autoincrement},
+                    tournament_id INTEGER,
+                    round INTEGER,
+                    player1_id {bigint_type},
+                    player2_id {bigint_type},
+                    winner_id {bigint_type},
+                    match_state TEXT,
+                    match_data TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    FOREIGN KEY (tournament_id) REFERENCES tournaments(id)
+                )
+            """)
+            # Tournament history
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS tournament_history (
+                    id {autoincrement},
+                    tournament_id INTEGER,
+                    event TEXT,
+                    meta TEXT,
+                    created_at TEXT
+                )
+            """)
+            # Daily challenges
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS daily_challenges (
+                    id {autoincrement},
+                    challenge_type TEXT,
+                    description TEXT,
+                    target INTEGER,
+                    reward_coins INTEGER,
+                    reward_xp INTEGER,
+                    created_at TEXT,
+                    expires_at TEXT
+                )
+            """)
+            # User challenge progress
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_challenge_progress (
+                    id {autoincrement},
+                    user_id {bigint_type},
+                    challenge_id INTEGER,
+                    progress INTEGER,
+                    completed BOOLEAN DEFAULT FALSE,
+                    completed_at TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    FOREIGN KEY (challenge_id) REFERENCES daily_challenges(id)
+                )
+            """)
+            # User XP/levels
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_levels (
+                    user_id {bigint_type} PRIMARY KEY,
+                    xp INTEGER DEFAULT 0,
+                    level INTEGER DEFAULT 1,
+                    tournament_points INTEGER DEFAULT 0,
+                    updated_at TEXT
+                )
+            """)
+            
+            logger.info("Database tables initialized successfully")
         
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
@@ -1394,13 +1621,14 @@ def kb_main_menu() -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton("⚙️ Custom Match", callback_data="custom_match")
     )
     kb.add(
-        types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats"),
-        types.InlineKeyboardButton("🥇 Leaderboard", callback_data="leaderboard")
+        types.InlineKeyboardButton("🏆 Tournament", callback_data="tournament_menu"),
+        types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats")
     )
     kb.add(
-        types.InlineKeyboardButton("🏅 Achievements", callback_data="achievements"),
-        types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
+        types.InlineKeyboardButton("🥇 Leaderboard", callback_data="leaderboard"),
+        types.InlineKeyboardButton("🏅 Achievements", callback_data="achievements")
     )
+    kb.add(types.InlineKeyboardButton("ℹ️ Help", callback_data="help"))
     return kb
 
 def kb_difficulty_select() -> types.InlineKeyboardMarkup:
@@ -1644,12 +1872,579 @@ def show_achievements(chat_id: int, user_id: int):
         logger.error(f"Error showing achievements: {e}")
         bot.send_message(chat_id, "❌ Error loading achievements. Please try again.")
 
+# GIF Animation System with Priority-Based Fallback
+def send_gif_with_fallback(chat_id: int, gif_type: str, fallback_text: str, reply_markup=None):
+    """Send GIF with automatic fallback to text animation if GIF fails"""
+    try:
+        if gif_type in CRICKET_GIFS and CRICKET_GIFS[gif_type]:
+            gif_url = random.choice(CRICKET_GIFS[gif_type])
+            try:
+                # Try to send GIF first (priority)
+                bot.send_animation(chat_id, gif_url, reply_markup=reply_markup)
+                return True
+            except Exception as gif_error:
+                logger.warning(f"GIF failed for {gif_type}: {gif_error}")
+                # Fallback to text animation
+                bot.send_message(chat_id, fallback_text, reply_markup=reply_markup)
+                return False
+        else:
+            # No GIF available, send text
+            bot.send_message(chat_id, fallback_text, reply_markup=reply_markup)
+            return False
+    except Exception as e:
+        logger.error(f"Error in gif fallback system: {e}")
+        bot.send_message(chat_id, fallback_text, reply_markup=reply_markup)
+        return False
+
+# Tournament System Functions
+def create_tournament(creator_id: int, theme: str, tournament_format: str) -> Optional[int]:
+    """Create a new tournament"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            now = datetime.now(timezone.utc).isoformat()
+            
+            theme_config = TOURNAMENT_THEMES.get(theme, TOURNAMENT_THEMES["world_cup"])
+            format_config = TOURNAMENT_FORMATS.get(tournament_format, TOURNAMENT_FORMATS["quick"])
+            
+            entry_fee = int(format_config["entry_fee"] * theme_config["entry_multiplier"])
+            
+            tournament_name = f"{theme_config['emoji']} {theme_config['name']} - {format_config['name']}"
+            
+            if is_postgres:
+                cur.execute("""
+                    INSERT INTO tournaments (name, theme, type, status, entry_fee, prize_pool, creator_id, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                """, (tournament_name, theme, tournament_format, TournamentStatus.REGISTRATION.value, 
+                      entry_fee, 0, creator_id, now, now))
+                tournament_id = cur.fetchone()[0]
+            else:
+                cur.execute("""
+                    INSERT INTO tournaments (name, theme, type, status, entry_fee, prize_pool, creator_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (tournament_name, theme, tournament_format, TournamentStatus.REGISTRATION.value,
+                      entry_fee, 0, creator_id, now, now))
+                tournament_id = cur.lastrowid
+            
+            # Auto-register creator
+            register_for_tournament(tournament_id, creator_id)
+            
+            return tournament_id
+            
+    except Exception as e:
+        logger.error(f"Error creating tournament: {e}")
+        return None
+
+def register_for_tournament(tournament_id: int, user_id: int) -> bool:
+    """Register user for tournament"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Check if already registered
+            cur.execute(f"""
+                SELECT id FROM tournament_players 
+                WHERE tournament_id = {param_style} AND user_id = {param_style}
+            """, (tournament_id, user_id))
+            
+            if cur.fetchone():
+                return False  # Already registered
+            
+            # Get tournament details
+            cur.execute(f"SELECT entry_fee, status FROM tournaments WHERE id = {param_style}", (tournament_id,))
+            tournament = cur.fetchone()
+            
+            if not tournament or tournament["status"] != TournamentStatus.REGISTRATION.value:
+                return False
+            
+            # Check user coins
+            cur.execute(f"SELECT coins FROM users WHERE user_id = {param_style}", (user_id,))
+            user = cur.fetchone()
+            
+            if not user or user["coins"] < tournament["entry_fee"]:
+                return False
+            
+            # Deduct coins and register
+            cur.execute(f"""
+                UPDATE users SET coins = coins - {param_style} WHERE user_id = {param_style}
+            """, (tournament["entry_fee"], user_id))
+            
+            cur.execute(f"""
+                INSERT INTO tournament_players (tournament_id, user_id, registered_at, coins_paid, status)
+                VALUES ({param_style}, {param_style}, {param_style}, {param_style}, 'active')
+            """, (tournament_id, user_id, now, tournament["entry_fee"]))
+            
+            # Update prize pool
+            cur.execute(f"""
+                UPDATE tournaments SET prize_pool = prize_pool + {param_style} WHERE id = {param_style}
+            """, (tournament["entry_fee"], tournament_id))
+            
+            return True
+            
+    except Exception as e:
+        logger.error(f"Error registering for tournament: {e}")
+        return False
+
+def start_tournament(tournament_id: int) -> bool:
+    """Start tournament and create bracket"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get participants
+            cur.execute(f"""
+                SELECT user_id FROM tournament_players 
+                WHERE tournament_id = {param_style} AND status = 'active'
+                ORDER BY registered_at
+            """, (tournament_id,))
+            
+            participants = [row["user_id"] for row in cur.fetchall()]
+            
+            if len(participants) < 2:
+                return False
+            
+            # Create first round matches
+            random.shuffle(participants)  # Randomize bracket
+            
+            round_num = 1
+            for i in range(0, len(participants), 2):
+                if i + 1 < len(participants):
+                    player1 = participants[i]
+                    player2 = participants[i + 1]
+                    
+                    cur.execute(f"""
+                        INSERT INTO tournament_matches 
+                        (tournament_id, round, player1_id, player2_id, match_state, started_at)
+                        VALUES ({param_style}, {param_style}, {param_style}, {param_style}, 'pending', {param_style})
+                    """, (tournament_id, round_num, player1, player2, datetime.now(timezone.utc).isoformat()))
+            
+            # Update tournament status
+            cur.execute(f"""
+                UPDATE tournaments SET status = {param_style}, updated_at = {param_style} 
+                WHERE id = {param_style}
+            """, (TournamentStatus.ONGOING.value, datetime.now(timezone.utc).isoformat(), tournament_id))
+            
+            return True
+            
+    except Exception as e:
+        logger.error(f"Error starting tournament: {e}")
+        return False
+
+def get_tournament_bracket(tournament_id: int) -> str:
+    """Generate tournament bracket display"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"""
+                SELECT tm.round, tm.player1_id, tm.player2_id, tm.winner_id, tm.match_state,
+                       u1.first_name as p1_name, u2.first_name as p2_name
+                FROM tournament_matches tm
+                LEFT JOIN users u1 ON u1.user_id = tm.player1_id
+                LEFT JOIN users u2 ON u2.user_id = tm.player2_id
+                WHERE tm.tournament_id = {param_style}
+                ORDER BY tm.round, tm.id
+            """, (tournament_id,))
+            
+            matches = cur.fetchall()
+            
+            if not matches:
+                return "No matches found"
+            
+            bracket_text = "🏆 <b>Tournament Bracket</b>\n\n"
+            
+            current_round = 0
+            for match in matches:
+                if match["round"] != current_round:
+                    current_round = match["round"]
+                    round_name = f"Round {current_round}" if current_round > 1 else "First Round"
+                    bracket_text += f"\n<b>{round_name}:</b>\n"
+                
+                p1_name = match["p1_name"] or "Player 1"
+                p2_name = match["p2_name"] or "Player 2"
+                
+                if match["match_state"] == "completed":
+                    winner_name = p1_name if match["winner_id"] == match["player1_id"] else p2_name
+                    bracket_text += f"✅ {p1_name} vs {p2_name} → <b>{winner_name}</b>\n"
+                elif match["match_state"] == "ongoing":
+                    bracket_text += f"🎮 {p1_name} vs {p2_name} (Playing)\n"
+                else:
+                    bracket_text += f"⏳ {p1_name} vs {p2_name} (Pending)\n"
+            
+            return bracket_text
+            
+    except Exception as e:
+        logger.error(f"Error generating bracket: {e}")
+        return "Error loading bracket"
+
+def get_active_tournaments() -> List[Dict]:
+    """Get list of active tournaments"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            cur.execute("""
+                SELECT t.*, COUNT(tp.user_id) as player_count
+                FROM tournaments t
+                LEFT JOIN tournament_players tp ON t.id = tp.tournament_id AND tp.status = 'active'
+                WHERE t.status IN ('registration', 'ongoing')
+                GROUP BY t.id, t.name, t.theme, t.type, t.status, t.entry_fee, t.prize_pool, t.creator_id, t.created_at, t.updated_at
+                ORDER BY t.created_at DESC
+                LIMIT 10
+            """)
+            
+            return [dict(row) for row in cur.fetchall()]
+            
+    except Exception as e:
+        logger.error(f"Error getting active tournaments: {e}")
+        return []
+
+def create_daily_challenges():
+    """Create daily challenges"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            now = datetime.now(timezone.utc)
+            expires_at = (now + timedelta(days=1)).isoformat()
+            
+            # Clear old challenges
+            cur.execute(f"DELETE FROM daily_challenges WHERE expires_at < {param_style}", (now.isoformat(),))
+            
+            # Create new challenges
+            for challenge_type, config in CHALLENGE_TYPES.items():
+                target = random.choice(config["targets"])
+                description = config["description"].format(target=target)
+                reward_coins = config["base_reward"] + (target * 2)
+                reward_xp = config["xp_reward"] + target
+                
+                cur.execute(f"""
+                    INSERT INTO daily_challenges 
+                    (challenge_type, description, target, reward_coins, reward_xp, created_at, expires_at)
+                    VALUES ({param_style}, {param_style}, {param_style}, {param_style}, {param_style}, {param_style}, {param_style})
+                """, (challenge_type, description, target, reward_coins, reward_xp, now.isoformat(), expires_at))
+            
+    except Exception as e:
+        logger.error(f"Error creating daily challenges: {e}")
+
+def check_challenge_progress(user_id: int, challenge_type: str, progress_value: int):
+    """Update challenge progress"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Get active challenges of this type
+            cur.execute(f"""
+                SELECT dc.id, dc.target, dc.reward_coins, dc.reward_xp
+                FROM daily_challenges dc
+                LEFT JOIN user_challenge_progress ucp ON dc.id = ucp.challenge_id AND ucp.user_id = {param_style}
+                WHERE dc.challenge_type = {param_style} AND dc.expires_at > {param_style}
+                AND (ucp.completed IS NULL OR ucp.completed = FALSE)
+            """, (user_id, challenge_type, now))
+            
+            challenges = cur.fetchall()
+            
+            for challenge in challenges:
+                # Check if progress record exists
+                cur.execute(f"""
+                    SELECT id, progress FROM user_challenge_progress 
+                    WHERE user_id = {param_style} AND challenge_id = {param_style}
+                """, (user_id, challenge["id"]))
+                
+                progress_record = cur.fetchone()
+                
+                if progress_record:
+                    new_progress = max(progress_record["progress"], progress_value)
+                    cur.execute(f"""
+                        UPDATE user_challenge_progress 
+                        SET progress = {param_style}, completed = {param_style}, completed_at = {param_style}
+                        WHERE id = {param_style}
+                    """, (new_progress, new_progress >= challenge["target"], 
+                          now if new_progress >= challenge["target"] else None, progress_record["id"]))
+                else:
+                    completed = progress_value >= challenge["target"]
+                    cur.execute(f"""
+                        INSERT INTO user_challenge_progress 
+                        (user_id, challenge_id, progress, completed, completed_at)
+                        VALUES ({param_style}, {param_style}, {param_style}, {param_style}, {param_style})
+                    """, (user_id, challenge["id"], progress_value, completed, 
+                          now if completed else None))
+                
+                # Award rewards if completed
+                if progress_value >= challenge["target"]:
+                    cur.execute(f"""
+                        UPDATE users SET coins = coins + {param_style} WHERE user_id = {param_style}
+                    """, (challenge["reward_coins"], user_id))
+                    
+                    # Update XP
+                    update_user_xp(user_id, challenge["reward_xp"])
+                    
+    except Exception as e:
+        logger.error(f"Error checking challenge progress: {e}")
+
+def update_user_xp(user_id: int, xp_gained: int):
+    """Update user XP and level"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Get current XP
+            cur.execute(f"SELECT xp, level FROM user_levels WHERE user_id = {param_style}", (user_id,))
+            user_level = cur.fetchone()
+            
+            if user_level:
+                new_xp = user_level["xp"] + xp_gained
+                new_level = get_level_from_xp(new_xp)
+                
+                cur.execute(f"""
+                    UPDATE user_levels SET xp = {param_style}, level = {param_style}, updated_at = {param_style}
+                    WHERE user_id = {param_style}
+                """, (new_xp, new_level, now, user_id))
+                
+                return new_level > user_level["level"]  # Level up?
+            else:
+                new_level = get_level_from_xp(xp_gained)
+                cur.execute(f"""
+                    INSERT INTO user_levels (user_id, xp, level, updated_at)
+                    VALUES ({param_style}, {param_style}, {param_style}, {param_style})
+                """, (user_id, xp_gained, new_level, now))
+                
+                return new_level > 1
+                
+    except Exception as e:
+        logger.error(f"Error updating user XP: {e}")
+        return False
+
+# Enhanced Keyboard Functions for Tournament System
+def kb_tournament_menu() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🆕 Create Tournament", callback_data="create_tournament"),
+        types.InlineKeyboardButton("🔍 Join Tournament", callback_data="join_tournament")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🏆 My Tournaments", callback_data="my_tournaments"),
+        types.InlineKeyboardButton("📊 Tournament Stats", callback_data="tournament_stats")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🎯 Daily Challenges", callback_data="daily_challenges"),
+        types.InlineKeyboardButton("🔙 Back", callback_data="main_menu")
+    )
+    return kb
+
+def kb_tournament_themes() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for theme_key, theme_config in TOURNAMENT_THEMES.items():
+        kb.add(types.InlineKeyboardButton(
+            f"{theme_config['emoji']} {theme_config['name'][:20]}...",
+            callback_data=f"theme_{theme_key}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu"))
+    return kb
+
+def kb_tournament_formats() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for format_key, format_config in TOURNAMENT_FORMATS.items():
+        kb.add(types.InlineKeyboardButton(
+            f"{format_config['name']} (💰{format_config['entry_fee']})",
+            callback_data=f"tformat_{format_key}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="create_tournament"))
+    return kb
+
+def kb_active_tournaments(tournaments: List[Dict]) -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for tournament in tournaments:
+        status_emoji = "📝" if tournament["status"] == "registration" else "🎮"
+        kb.add(types.InlineKeyboardButton(
+            f"{status_emoji} {tournament['name'][:30]}... ({tournament['player_count']} players)",
+            callback_data=f"view_tournament_{tournament['id']}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu"))
+    return kb
+
 def ensure_user(message: types.Message):
     if message.from_user:
         try:
             upsert_user(message.from_user)
         except Exception as e:
             logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
+
+# Enhanced message processing with GIF animations
+@bot.message_handler(func=lambda message: message.text and message.text.isdigit() and 1 <= int(message.text) <= 6)
+def handle_ball_input_with_gifs(message: types.Message):
+    try:
+        ensure_user(message)
+        user_value = int(message.text)
+        result = enhanced_process_ball_v2(message.chat.id, user_value, message.from_user.id)
+        
+        if isinstance(result, str):
+            bot.send_message(message.chat.id, result)
+            return
+        
+        # Enhanced ball result processing with GIF animations
+        commentary = result['commentary']
+        is_wicket = result['is_wicket']
+        runs_scored = result['runs_scored']
+        game_state = result['game_state']
+        
+        # Determine GIF type and send with fallback
+        if is_wicket:
+            send_gif_with_fallback(message.chat.id, "wicket", commentary)
+        elif runs_scored == 6:
+            send_gif_with_fallback(message.chat.id, "six", commentary)
+        elif runs_scored == 4:
+            send_gif_with_fallback(message.chat.id, "four", commentary)
+        else:
+            bot.send_message(message.chat.id, commentary)
+        
+        # Check for special achievements with GIFs
+        if game_state['batting'] == 'player':
+            if game_state['player_score'] >= 100 and game_state['player_score'] - runs_scored < 100:
+                send_gif_with_fallback(message.chat.id, "century", 
+                    "🎉 CENTURY! What an incredible knock! 💯")
+        
+        # Over completion message
+        if result['over_completed']:
+            over_summary = f"📊 End of Over {game_state['overs_bowled']}\n"
+            if game_state['batting'] == 'player':
+                over_summary += f"Your Score: {game_state['player_score']}/{game_state['player_wkts']}"
+            else:
+                over_summary += f"Bot Score: {game_state['bot_score']}/{game_state['bot_wkts']}"
+            bot.send_message(message.chat.id, over_summary)
+        
+        # Powerplay end message
+        if result['powerplay_ended']:
+            bot.send_message(message.chat.id, "⚡ Powerplay Over! Field restrictions lifted.")
+        
+        # Match end processing with tournament integration
+        if result['match_ended']:
+            match_result = result['result']
+            if isinstance(match_result, dict):
+                # Tournament match completion
+                if game_state.get('is_tournament_match'):
+                    handle_tournament_match_completion(message.chat.id, message.from_user.id, match_result)
+                
+                # Update challenge progress
+                check_challenge_progress(message.from_user.id, "score_runs", game_state['player_score'])
+                check_challenge_progress(message.from_user.id, "hit_sixes", game_state['player_sixes'])
+                if match_result['result_type'] == 'win':
+                    check_challenge_progress(message.from_user.id, "win_matches", 1)
+        
+    except Exception as e:
+        logger.error(f"Error handling ball input with GIFs: {e}")
+        bot.send_message(message.chat.id, "❌ Error processing your move. Please try again.")
+
+def handle_tournament_match_completion(chat_id: int, user_id: int, match_result: Dict):
+    """Handle completion of tournament match"""
+    try:
+        # Award tournament points and XP
+        if match_result['result_type'] == 'win':
+            update_user_xp(user_id, 100)  # Bonus XP for tournament win
+            send_gif_with_fallback(chat_id, "tournament_win", 
+                "🏆 TOURNAMENT VICTORY! You advance to the next round! 🎉")
+        else:
+            update_user_xp(user_id, 25)  # Participation XP
+            
+        # Update tournament progress
+        # This would integrate with the tournament bracket system
+        
+    except Exception as e:
+        logger.error(f"Error handling tournament match completion: {e}")
+
+@bot.message_handler(commands=["tournament"])
+def cmd_tournament(message: types.Message):
+    try:
+        ensure_user(message)
+        show_tournament_menu(message.chat.id)
+    except Exception as e:
+        logger.error(f"Error in tournament command: {e}")
+        bot.send_message(message.chat.id, "❌ Error loading tournament menu.")
+
+def show_tournament_menu(chat_id: int):
+    """Show main tournament menu"""
+    tournament_text = (
+        "🏆 <b>Tournament Central</b>\n\n"
+        "🎮 <b>Compete against players worldwide!</b>\n\n"
+        "✨ <b>Features:</b>\n"
+        "• Multiple tournament themes\n"
+        "• Real-time brackets\n"
+        "• Prize pools & rewards\n"
+        "• Tournament rankings\n\n"
+        "Choose an option below:"
+    )
+    
+    send_gif_with_fallback(chat_id, "tournament_start", tournament_text, kb_tournament_menu())
+
+@bot.message_handler(commands=["challenges"])
+def cmd_challenges(message: types.Message):
+    try:
+        ensure_user(message)
+        show_daily_challenges(message.chat.id, message.from_user.id)
+    except Exception as e:
+        logger.error(f"Error in challenges command: {e}")
+        bot.send_message(message.chat.id, "❌ Error loading challenges.")
+
+def show_daily_challenges(chat_id: int, user_id: int):
+    """Show daily challenges"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Get active challenges with user progress
+            cur.execute(f"""
+                SELECT dc.*, COALESCE(ucp.progress, 0) as progress, 
+                       COALESCE(ucp.completed, FALSE) as completed
+                FROM daily_challenges dc
+                LEFT JOIN user_challenge_progress ucp ON dc.id = ucp.challenge_id AND ucp.user_id = {param_style}
+                WHERE dc.expires_at > {param_style}
+                ORDER BY dc.created_at
+            """, (user_id, now))
+            
+            challenges = cur.fetchall()
+            
+            if not challenges:
+                create_daily_challenges()  # Create new challenges if none exist
+                bot.send_message(chat_id, "🎯 New daily challenges created! Use /challenges to view them.")
+                return
+            
+            challenges_text = "🎯 <b>Daily Challenges</b>\n\n"
+            
+            for challenge in challenges:
+                status_emoji = "✅" if challenge["completed"] else "🎯"
+                progress_bar = "█" * min(10, int(challenge["progress"] / challenge["target"] * 10))
+                progress_bar += "░" * (10 - len(progress_bar))
+                
+                challenges_text += (
+                    f"{status_emoji} <b>{CHALLENGE_TYPES[challenge['challenge_type']]['name']}</b>\n"
+                    f"   {challenge['description']}\n"
+                    f"   Progress: {challenge['progress']}/{challenge['target']} [{progress_bar}]\n"
+                    f"   Reward: 💰{challenge['reward_coins']} coins, ⭐{challenge['reward_xp']} XP\n\n"
+                )
+            
+            bot.send_message(chat_id, challenges_text)
+            
+    except Exception as e:
+        logger.error(f"Error showing daily challenges: {e}")
+        bot.send_message(chat_id, "❌ Error loading challenges.")
 
 # Message handlers
 @bot.message_handler(commands=['start'])
@@ -1663,7 +2458,8 @@ def cmd_start(message: types.Message):
             f"• 🎯 Multiple game formats (T1 to T20)\n"
             f"• 🤖 Smart AI opponents\n" 
             f"• 📊 Detailed statistics\n"
-            f"• 🎬 Live commentary\n\n"
+            f"• 🎬 Live commentary & GIF animations\n"
+            f"• 🏆 Tournaments & daily challenges\n\n"
             f"Ready to play some cricket?"
         )
         bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
@@ -1684,16 +2480,19 @@ def cmd_help(message: types.Message):
             f"• Different numbers = RUNS! ✅\n\n"
             f"<b>🎮 Game Modes:</b>\n"
             f"• Quick Play - instant T2 match\n"
-            f"• Custom Match - choose format & difficulty\n\n"
+            f"• Custom Match - choose format & difficulty\n"
+            f"• Tournaments - compete with others\n\n"
             f"<b>⚡ Commands:</b>\n"
             f"/play - Start quick match\n"
-            f"/stats - Your statistics  \n"
+            f"/tournament - Join tournaments\n"
+            f"/challenges - Daily challenges\n"
+            f"/stats - Your statistics\n"
             f"/leaderboard - Top players\n"
             f"/help - Show this help\n\n"
             f"<b>🎯 Tips:</b>\n"
-            f"• Use /score during match for live score\n"
+            f"��� Use /score during match for live score\n"
             f"• Higher difficulty = smarter AI\n"
-            f"• Complete achievements for bragging rights!"
+            f"• Complete challenges for rewards!"
         )
         
         bot.send_message(message.chat.id, help_text, reply_markup=kb_main_menu())
@@ -1727,6 +2526,105 @@ def cmd_leaderboard(message: types.Message):
     except Exception as e:
         logger.error(f"Error in leaderboard command: {e}")
         bot.send_message(message.chat.id, "❌ Error loading leaderboard.")
+
+# Background task to create daily challenges
+def create_daily_challenges_task():
+    """Background task to create daily challenges"""
+    while True:
+        try:
+            create_daily_challenges()
+            logger.info("Daily challenges created/updated")
+            time.sleep(86400)  # Sleep for 24 hours
+        except Exception as e:
+            logger.error(f"Error in daily challenges task: {e}")
+            time.sleep(3600)  # Sleep for 1 hour on error
+
+# Start background tasks
+def start_background_tasks():
+    """Start background tasks"""
+    try:
+        # Start daily challenges task in background
+        challenge_thread = threading.Thread(target=create_daily_challenges_task, daemon=True)
+        challenge_thread.start()
+        logger.info("Background tasks started")
+    except Exception as e:
+        logger.error(f"Error starting background tasks: {e}")
+
+# Initialize everything
+def initialize_bot():
+    """Initialize the bot and database"""
+    try:
+        logger.info("Initializing Cricket Bot...")
+        
+        # Initialize database
+        db_init()
+        logger.info("Database initialized")
+        
+        # Create initial daily challenges
+        create_daily_challenges()
+        logger.info("Initial daily challenges created")
+        
+        # Start background tasks
+        start_background_tasks()
+        
+        logger.info("Cricket Bot initialization complete!")
+        
+    except Exception as e:
+        logger.error(f"Error during bot initialization: {e}")
+        raise
+
+# Main execution
+if __name__ == "__main__":
+    try:
+        # Initialize bot
+        initialize_bot()
+        
+        if USE_WEBHOOK:
+            # Webhook mode
+            logger.info("Starting bot in webhook mode...")
+            
+            # Flask app for webhook
+            app = Flask(__name__)
+            
+            @app.route(f"/{TOKEN}", methods=['POST'])
+            def webhook():
+                try:
+                    json_str = request.get_data().decode('UTF-8')
+                    update = telebot.types.Update.de_json(json_str)
+                    bot.process_new_updates([update])
+                    return '', 200
+                except Exception as e:
+                    logger.error(f"Webhook error: {e}")
+                    return '', 500
+            
+            @app.route('/health', methods=['GET'])
+            def health_check():
+                return jsonify({"status": "healthy", "bot": "cricket_bot"}), 200
+            
+            # Set webhook
+            if WEBHOOK_URL:
+                webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+                bot.remove_webhook()
+                time.sleep(1)
+                bot.set_webhook(url=webhook_url)
+                logger.info(f"Webhook set to: {webhook_url}")
+            
+            # Start Flask app
+            app.run(host='0.0.0.0', port=PORT, debug=False)
+            
+        else:
+            # Polling mode
+            logger.info("Starting bot in polling mode...")
+            bot.remove_webhook()
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Critical error: {e}")
+        raise
+    finally:
+        logger.info("Cricket Bot shutdown complete")
 
 @bot.message_handler(commands=["score"])
 def cmd_score(message: types.Message):
@@ -2024,7 +2922,8 @@ def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
             "hat_trick": "🎩",
             "win": "🏆",
             "lose": "😔",
-            "tie": "🤝"
+            "tie": "🤝",
+            "tournament_win": "🏆"
         }
         
         if event_type in CRICKET_EMOJIS:

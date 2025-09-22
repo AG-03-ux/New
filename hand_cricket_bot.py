@@ -626,41 +626,82 @@ def db_init():
                     )
                 """)
             # Daily challenges
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS daily_challenges (
-                    id {autoincrement},
-                    challenge_type TEXT,
-                    description TEXT,
-                    target INTEGER,
-                    reward_coins INTEGER,
-                    reward_xp INTEGER,
-                    created_at TEXT,
-                    expires_at TEXT
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS daily_challenges (
+                        id SERIAL PRIMARY KEY,
+                        challenge_type TEXT,
+                        description TEXT,
+                        target INTEGER,
+                        reward_coins INTEGER,
+                        reward_xp INTEGER,
+                        created_at TEXT,
+                        expires_at TEXT
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS daily_challenges (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        challenge_type TEXT,
+                        description TEXT,
+                        target INTEGER,
+                        reward_coins INTEGER,
+                        reward_xp INTEGER,
+                        created_at TEXT,
+                        expires_at TEXT
+                    )
+                """)
+            
             # User challenge progress
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS user_challenge_progress (
-                    id {autoincrement},
-                    user_id {bigint_type},
-                    challenge_id INTEGER,
-                    progress INTEGER,
-                    completed BOOLEAN DEFAULT FALSE,
-                    completed_at TEXT,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id),
-                    FOREIGN KEY (challenge_id) REFERENCES daily_challenges(id)
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_challenge_progress (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        challenge_id INTEGER,
+                        progress INTEGER,
+                        completed BOOLEAN DEFAULT FALSE,
+                        completed_at TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users(user_id),
+                        FOREIGN KEY (challenge_id) REFERENCES daily_challenges(id)
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_challenge_progress (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        challenge_id INTEGER,
+                        progress INTEGER,
+                        completed BOOLEAN DEFAULT FALSE,
+                        completed_at TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users(user_id),
+                        FOREIGN KEY (challenge_id) REFERENCES daily_challenges(id)
+                    )
+                """)
+            
             # User XP/levels
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS user_levels (
-                    user_id {bigint_type} PRIMARY KEY,
-                    xp INTEGER DEFAULT 0,
-                    level INTEGER DEFAULT 1,
-                    tournament_points INTEGER DEFAULT 0,
-                    updated_at TEXT
-                )
-            """)
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_levels (
+                        user_id BIGINT PRIMARY KEY,
+                        xp INTEGER DEFAULT 0,
+                        level INTEGER DEFAULT 1,
+                        tournament_points INTEGER DEFAULT 0,
+                        updated_at TEXT
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_levels (
+                        user_id INTEGER PRIMARY KEY,
+                        xp INTEGER DEFAULT 0,
+                        level INTEGER DEFAULT 1,
+                        tournament_points INTEGER DEFAULT 0,
+                        updated_at TEXT
+                    )
+                """)
             
             logger.info("Database tables initialized successfully")
         

@@ -4100,28 +4100,6 @@ app = Flask(__name__)
 def index():
     return "<h1>Cricket Bot is alive!</h1><p>Webhook is ready for Telegram updates.</p>", 200
 
-@app.route('/webhook/' + TOKEN, methods=['POST'])  # Change this line
-def webhook():
-    try:
-        if request.headers.get('content-type') == 'application/json':
-            json_string = request.get_data().decode('utf-8')
-            logger.info(f"Received webhook data: {json_string[:200]}...")
-            
-            update = telebot.types.Update.de_json(json_string)
-            logger.info(f"Processing update ID: {update.update_id}")
-            
-            # Process the update
-            bot.process_new_updates([update])
-            
-            logger.info(f"Update {update.update_id} processed successfully")
-            return '', 200
-        else:
-            logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
-            return 'Invalid request', 400
-    except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
-        return 'Error processing update', 500
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return 'OK', 200
@@ -4172,22 +4150,6 @@ def status_check():
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         return jsonify({'error': 'Status check failed'}), 500
-
-@app.route('/webhook-info', methods=['GET'])
-def get_webhook_info():
-    try:
-        info = bot.get_webhook_info()
-        return {
-            'webhook_url': info.url,
-            'has_custom_certificate': info.has_custom_certificate,
-            'pending_update_count': info.pending_update_count,
-            'last_error_date': info.last_error_date,
-            'last_error_message': info.last_error_message,
-            'max_connections': info.max_connections,
-            'allowed_updates': info.allowed_updates
-        }
-    except Exception as e:
-        return {'error': str(e)}
 
 @app.route('/webhook-info', methods=['GET'])
 def get_webhook_info():

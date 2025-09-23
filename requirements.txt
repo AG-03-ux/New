@@ -6,3 +6,4 @@ psycopg2-binary
 requests
 schedule
 gunicorn
+gevent

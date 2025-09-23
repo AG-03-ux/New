@@ -3415,6 +3415,30 @@ def ensure_user(message: types.Message):
         except Exception as e:
             logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
 
+
+def setup_webhook():
+    try:
+        if USE_WEBHOOK and WEBHOOK_URL:
+            # Ensure proper webhook URL format
+            webhook_url = WEBHOOK_URL.rstrip('/')
+            if not webhook_url.endswith('/webhook/' + TOKEN):
+                webhook_url += '/webhook/' + TOKEN
+            
+            logger.info(f"Setting webhook to: {webhook_url}")
+            result = bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook set result: {result}")
+            
+            # Verify webhook was set
+            info = bot.get_webhook_info()
+            logger.info(f"Webhook info: URL={info.url}, pending={info.pending_update_count}")
+            
+            if info.last_error_message:
+                logger.error(f"Webhook error: {info.last_error_message}")
+            
+            return True
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
+        return False
 # Message handlers
 @bot.message_handler(commands=['start'])
 def cmd_start(message: types.Message):
@@ -4076,7 +4100,7 @@ app = Flask(__name__)
 def index():
     return "<h1>Cricket Bot is alive!</h1><p>Webhook is ready for Telegram updates.</p>", 200
 
-@app.route('/' + TOKEN, methods=['POST'])
+@app.route('/webhook/' + TOKEN, methods=['POST'])  # Change this line
 def webhook():
     try:
         if request.headers.get('content-type') == 'application/json':
@@ -4085,11 +4109,6 @@ def webhook():
             
             update = telebot.types.Update.de_json(json_string)
             logger.info(f"Processing update ID: {update.update_id}")
-            
-            if update.message:
-                logger.info(f"Message in update: '{update.message.text}' from user {update.message.from_user.id}")
-            else:
-                logger.info("No message in update")
             
             # Process the update
             bot.process_new_updates([update])
@@ -4154,6 +4173,61 @@ def status_check():
         logger.error(f"Status check failed: {e}")
         return jsonify({'error': 'Status check failed'}), 500
 
+@app.route('/webhook-info', methods=['GET'])
+def get_webhook_info():
+    try:
+        info = bot.get_webhook_info()
+        return {
+            'webhook_url': info.url,
+            'has_custom_certificate': info.has_custom_certificate,
+            'pending_update_count': info.pending_update_count,
+            'last_error_date': info.last_error_date,
+            'last_error_message': info.last_error_message,
+            'max_connections': info.max_connections,
+            'allowed_updates': info.allowed_updates
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+@app.route('/webhook-info', methods=['GET'])
+def get_webhook_info():
+    try:
+        info = bot.get_webhook_info()
+        return {
+            'webhook_url': info.url,
+            'has_custom_certificate': info.has_custom_certificate,
+            'pending_update_count': info.pending_update_count,
+            'last_error_date': info.last_error_date,
+            'last_error_message': info.last_error_message,
+            'max_connections': info.max_connections,
+            'allowed_updates': info.allowed_updates
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+@app.route('/webhook/' + TOKEN, methods=['POST'])
+def webhook_correct():
+    """Handle webhook at the correct path"""
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_string = request.get_data().decode('utf-8')
+            logger.info(f"Received webhook data: {json_string[:200]}...")
+            
+            update = telebot.types.Update.de_json(json_string)
+            logger.info(f"Processing update ID: {update.update_id}")
+            
+            # Process the update
+            bot.process_new_updates([update])
+            
+            logger.info(f"Update {update.update_id} processed successfully")
+            return '', 200
+        else:
+            logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
+            return 'Invalid request', 400
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return 'Error processing update', 500
+
 
 @app.route('/test', methods=['GET'])
 def test_bot():
@@ -4191,11 +4265,10 @@ try:
     # Set webhook for production
     if WEBHOOK_URL and USE_WEBHOOK:
         logger.info("=== SETTING WEBHOOK ===")
-        webhook_url = WEBHOOK_URL.rstrip('/')
-        if not webhook_url.endswith('/' + TOKEN):
-            webhook_url += '/' + TOKEN
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"=== WEBHOOK SET TO: {webhook_url} ===")
+    if setup_webhook():
+        logger.info("=== WEBHOOK SETUP: SUCCESS ===")
+    else:
+        logger.error("=== WEBHOOK SETUP: FAILED ===")
         
 except Exception as e:
     logger.error(f"=== CRITICAL INITIALIZATION ERROR ===", exc_info=True)
@@ -4218,9 +4291,13 @@ if __name__ == "__main__":
         
         if USE_WEBHOOK and WEBHOOK_URL:
             # Webhook mode
-            webhook_url = WEBHOOK_URL.rstrip('/') + '/' + TOKEN
-            bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook set to: {webhook_url}")
+            logger.info("=== STARTING WEBHOOK MODE ===")
+            if setup_webhook():
+                logger.info("Webhook configured successfully")
+            else:
+                logger.error("Webhook configuration failed")
+            
+            logger.info(f"Starting Flask app on port {PORT}")
             app.run(host='0.0.0.0', port=PORT, debug=False)
         else:
             # Polling mode
@@ -4230,7 +4307,11 @@ if __name__ == "__main__":
             
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
-        bot.stop_polling()
+        if not USE_WEBHOOK:
+            bot.stop_polling()
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+        # Don't exit in production - keep the service running
+        if USE_WEBHOOK:
+            logger.info("Keeping Flask app running despite error")
+            app.run(host='0.0.0.0', port=PORT, debug=False)

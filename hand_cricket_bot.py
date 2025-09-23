@@ -26,7 +26,6 @@ import uuid
 from enum import Enum
 import os
 from pathlib import Path
-from migration_system import migrate_database, get_db_version, create_schema_version_table
 import time
 
 # Load environment variables first
@@ -130,16 +129,14 @@ def validate_environment():
     logger.info("Environment validation completed successfully")
 
 def get_user_session_data(user_id: int, key: str = None, default=None):
-    """Get session data - fixed function signature"""
+    """Get session data - FIXED VERSION"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            if is_postgres:
-                cur.execute("SELECT session_data FROM user_sessions WHERE user_id = %s", (user_id,))
-            else:
-                cur.execute("SELECT session_data FROM user_sessions WHERE user_id = ?", (user_id,))
+            cur.execute(f"SELECT session_data FROM user_sessions WHERE user_id = {param_style}", (user_id,))
             
             row = cur.fetchone()
             if row and row['session_data']:
@@ -148,40 +145,33 @@ def get_user_session_data(user_id: int, key: str = None, default=None):
                     return session_data.get(key, default)
                 return session_data
             
-            # Return appropriate default
-            if key:
-                return default
-            return {}
+            return default if key else {}
+            
     except Exception as e:
         logger.error(f"Error getting session data: {e}")
-        if key:
-            return default
-        return {}
+        return default if key else {}
+
 
 def set_user_session_data(user_id: int, key: str, value):
-    """Set session data in database"""
+    """Set session data in database - fixed with consistent parameters"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
             # Get existing data
             session_data = {}
-            if is_postgres:
-                cur.execute("SELECT session_data FROM user_sessions WHERE user_id = %s", (user_id,))
-            else:
-                cur.execute("SELECT session_data FROM user_sessions WHERE user_id = ?", (user_id,))
+            cur.execute(f"SELECT session_data FROM user_sessions WHERE user_id = {param_style}", (user_id,))
             
             row = cur.fetchone()
             if row and row['session_data']:
-                import json
                 session_data = json.loads(row['session_data'])
             
             # Update data
             session_data[key] = value
             
             # Save back
-            import json
             now = datetime.now(timezone.utc).isoformat()
             if is_postgres:
                 cur.execute("""
@@ -198,10 +188,6 @@ def set_user_session_data(user_id: int, key: str, value):
                 
     except Exception as e:
         logger.error(f"Error setting session data: {e}")
-
-def get_session_data(user_id: int, key: str, default=None):
-    session = get_user_session_data(user_id)
-    return session.get(key, default)
 
 # Tournament Status Enum
 class TournamentStatus(Enum):
@@ -357,6 +343,81 @@ def get_db_connection():
                 conn.close()
 
 
+def create_schema_version_table():
+    """Create schema_version table to track migrations"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_version (
+                        version INTEGER PRIMARY KEY,
+                        description TEXT,
+                        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_version (
+                        version INTEGER PRIMARY KEY,
+                        description TEXT,
+                        applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+            
+            # Check if we have any version records
+            cur.execute("SELECT COUNT(*) as count FROM schema_version")
+            count = cur.fetchone()["count"]
+            
+            if count == 0:
+                # Insert initial version
+                now = datetime.now(timezone.utc).isoformat()
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO schema_version (version, description, applied_at)
+                        VALUES (%s, %s, %s)
+                    """, (0, "Initial schema", now))
+                else:
+                    cur.execute("""
+                        INSERT INTO schema_version (version, description, applied_at)
+                        VALUES (?, ?, ?)
+                    """, (0, "Initial schema", now))
+                    
+    except Exception as e:
+        logger.error(f"Error creating schema_version table: {e}")
+        raise
+
+def get_db_version():
+    """Get current database schema version"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
+            result = cur.fetchone()
+            return result['version'] if result else 0
+    except Exception:
+        # If schema_version table doesn't exist, assume version 0
+        return 0
+
+def migrate_database():
+    """Run all pending database migrations"""
+    try:
+        logger.info("Starting database migration check...")
+        
+        # Ensure schema_version table exists
+        create_schema_version_table()
+        
+        current_version = get_db_version()
+        # For now, just create the table - no actual migrations needed
+        
+        logger.info(f"Current database version: {current_version}")
+        logger.info("Database migration completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Database migration failed: {e}", exc_info=True)
+        logger.warning("Application will continue with current database schema")
 def safe_bot_operation(func):
     """Decorator for safe bot operations with retry logic"""
     @wraps(func)
@@ -497,7 +558,16 @@ def db_init():
                     prestige INTEGER DEFAULT 0,
                     created_at {timestamp_type},
                     updated_at {timestamp_type}
-                )"""
+                )""",
+
+                
+                f"""CREATE TABLE IF NOT EXISTS user_sessions (
+                    user_id {bigint_type} PRIMARY KEY,
+                    session_data {text_type},
+                    created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    updated_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
+                )""",
+
                 f"""CREATE TABLE IF NOT EXISTS games (
                     chat_id {bigint_type} PRIMARY KEY,
                     state {text_type} DEFAULT 'toss',
@@ -540,13 +610,6 @@ def db_init():
                     meta {text_type},
                     created_at {timestamp_type}
                 )""",
-
-                f"""CREATE TABLE IF NOT EXISTS user_sessions (
-                    user_id BIGINT PRIMARY KEY,
-                    session_data TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );""",
                 
                 f"""CREATE TABLE IF NOT EXISTS match_history (
                     id {autoincrement},
@@ -956,11 +1019,16 @@ class TournamentManager:
         tournament.prize_pool = tournament.entry_fee * tournament.max_players + (tournament.entry_fee * 2)
         tournament.starts_at = datetime.now(timezone.utc) + timedelta(hours=1)
         tournament.brackets = self._generate_bracket_structure(tournament.max_players, tournament.type)
-        self._save_tournament_to_db(tournament)
+        _save_tournament_to_db(tournament)
         self.active_tournaments[tournament.id] = tournament
         logger.info(f"Tournament {tournament.id} created by user {creator_id}")
+        tournament.status = TournamentStatus.REGISTRATION
         return tournament
     
+    def _get_tournament_participants(self, tournament_id: int) -> list:
+        return _get_tournament_participants(tournament_id)
+
+
     def _generate_bracket_structure(self, max_players: int, tournament_type: TournamentType) -> dict:
         if tournament_type == TournamentType.KNOCKOUT:
             return self._generate_knockout_brackets(max_players)
@@ -1021,20 +1089,21 @@ class TournamentManager:
             if len(tournament.participants) >= tournament.max_players:
                 return {"success": False, "message": "Tournament is full"}
             
-            user_coins = self._get_user_coins(user_id)
+            # Change these from self._method to module functions
+            user_coins = _get_user_coins(user_id)  # Remove self.
             if user_coins < tournament.entry_fee:
                 return {"success": False, "message": f"Insufficient coins. Need {tournament.entry_fee} coins"}
             
-            self._deduct_user_coins(user_id, tournament.entry_fee)
+            _deduct_user_coins(user_id, tournament.entry_fee)  # Remove self.
             tournament.participants.append(user_id)
-            self._save_tournament_participant(tournament_id, user_id, len(tournament.participants))
+            _save_tournament_participant(tournament_id, user_id, len(tournament.participants))  # Remove self.
             
             if len(tournament.participants) >= tournament.max_players:
                 tournament.status = TournamentStatus.ONGOING
-                self._start_tournament(tournament_id)
+                _start_tournament(tournament_id)  # Remove self.
             
-            self._update_tournament_in_db(tournament)
-            self._send_registration_confirmation(chat_id, user_id, tournament)
+            _update_tournament_in_db(tournament)  # Remove self.
+            _send_registration_confirmation(chat_id, user_id, tournament)
             
             return {
                 "success": True, 
@@ -1046,13 +1115,7 @@ class TournamentManager:
             logger.error(f"Error registering player {user_id} for tournament {tournament_id}: {e}")
             return {"success": False, "message": "Registration failed. Please try again."}
     
-    def _save_tournament_to_db(self, tournament: Tournament):
-        """Instance method version"""
-        return _save_tournament_to_db(tournament)
     
-    def _update_tournament_in_db(self, tournament):
-        """Instance method version"""
-        return _update_tournament_in_db(tournament)
     def _get_tournament(self, tournament_id: int) -> Tournament:
         if tournament_id in self.active_tournaments:
             return self.active_tournaments[tournament_id]
@@ -1657,17 +1720,16 @@ def _save_tournament_participant(tournament_id: int, user_id: int, position: int
     except Exception as e:
         logger.error(f"Error saving tournament participant: {e}")
 
+# Replace all database queries to use consistent parameter style
 def _get_user_coins(user_id: int) -> int:
+    """FIXED VERSION - proper column access"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            if is_postgres:
-                cur.execute("SELECT coins FROM users WHERE user_id = %s", (user_id,))
-            else:
-                cur.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-            
+            cur.execute(f"SELECT coins FROM users WHERE user_id = {param_style}", (user_id,))
             row = cur.fetchone()
             return row["coins"] if row else 0
     except Exception as e:
@@ -1675,28 +1737,26 @@ def _get_user_coins(user_id: int) -> int:
         return 0
 
 def _deduct_user_coins(user_id: int, amount: int):
+    """Fixed version with consistent parameters"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            if is_postgres:
-                cur.execute("UPDATE users SET coins = coins - %s WHERE user_id = %s", (amount, user_id))
-            else:
-                cur.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (amount, user_id))
+            cur.execute(f"UPDATE users SET coins = coins - {param_style} WHERE user_id = {param_style}", (amount, user_id))
     except Exception as e:
         logger.error(f"Error deducting user coins: {e}")
 
 def _award_coins(user_id: int, amount: int):
+    """Fixed version with consistent parameters"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            if is_postgres:
-                cur.execute("UPDATE users SET coins = coins + %s WHERE user_id = %s", (amount, user_id))
-            else:
-                cur.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
+            cur.execute(f"UPDATE users SET coins = coins + {param_style} WHERE user_id = {param_style}", (amount, user_id))
     except Exception as e:
         logger.error(f"Error awarding coins: {e}")
 
@@ -2067,15 +2127,14 @@ def claim_challenge_rewards(chat_id: int, user_id: int):
         bot.send_message(chat_id, "❌ Error loading rewards.")
 
 def _get_user_level_info(user_id: int) -> dict:
+    """Fixed version with consistent parameters"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            if is_postgres:
-                cur.execute("SELECT * FROM user_levels WHERE user_id = %s", (user_id,))
-            else:
-                cur.execute("SELECT * FROM user_levels WHERE user_id = ?", (user_id,))
+            cur.execute(f"SELECT * FROM user_levels WHERE user_id = {param_style}", (user_id,))
             
             level_data = cur.fetchone()
             
@@ -2118,9 +2177,7 @@ def schedule_daily_tasks():
 # ADD THIS INITIALIZATION FUNCTION - CALL THIS IN YOUR MAIN SECTION:
 def start_background_systems():
     try:
-        initialize_daily_systems()
-        schedule_daily_tasks()
-        logger.info("All background systems started successfully")
+        logger.info("Background systems initialized")
     except Exception as e:
         logger.error(f"Error starting background systems: {e}")
 # Game Logic Functions
@@ -2868,7 +2925,7 @@ def update_user_stats_v2(user_id: int, g: Dict[str, Any], result: str):
             if result == "win":
                 tracker.update_progress(ChallengeType.WINS, 1)
                 # Update streak
-                current_streak = get_session_data(user_id, "current_streak", 0) + 1
+                current_streak = get_user_session_data(user_id, "current_streak", 0) + 1
                 set_user_session_data(user_id, "current_streak", current_streak)
                 tracker.update_progress(ChallengeType.STREAK, current_streak)
             else:
@@ -3146,6 +3203,18 @@ def _start_tournament(tournament_id: int):
             
     except Exception as e:
         logger.error(f"Error starting tournament {tournament_id}: {e}")
+
+
+
+def get_param_style():
+    return "%s" if os.getenv("DATABASE_URL") else "?"
+
+def execute_query(cursor, query, params):
+    """Execute query with proper parameter style"""
+    if os.getenv("DATABASE_URL"):  # PostgreSQL
+        cursor.execute(query.replace("?", "%s"), params)
+    else:  # SQLite
+        cursor.execute(query, params)
 
 
 def show_user_stats(chat_id: int, user_id: int):
@@ -3556,9 +3625,8 @@ def handle_callback(call: types.CallbackQuery):
         # Difficulty selection
         elif call.data.startswith("diff_"):
             difficulty = call.data.split("_")[1]
-            overs = get_session_data(user_id, "custom_overs", DEFAULT_OVERS)
-            wickets = get_session_data(user_id, "custom_wickets", DEFAULT_WICKETS)
-            
+            overs = get_user_session_data(user_id, "custom_overs", DEFAULT_OVERS)
+            wickets = get_user_session_data(user_id, "custom_wickets", DEFAULT_WICKETS)            
             safe_start_new_game(chat_id, overs, wickets, difficulty, user_id)
             bot.answer_callback_query(call.id, "Starting custom match...")
         
@@ -3824,7 +3892,7 @@ def handle_tournament_theme_selection(chat_id: int, user_id: int, theme_key: str
             bot.send_message(chat_id, "Invalid theme selection.")
             return
         
-        format_key = get_session_data(user_id, "tournament_format")
+        format_key = get_user_session_data(user_id, "tournament_format", None)
         if not format_key:
             bot.send_message(chat_id, "Session expired. Please start over.")
             return

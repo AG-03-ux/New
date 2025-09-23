@@ -17,7 +17,6 @@ from telebot import types
 from dotenv import load_dotenv
 from enum import Enum
 from collections import defaultdict, deque
-import uuid
 from functools import wraps
 import schedule
 from collections import deque
@@ -86,8 +85,8 @@ LOGGING_CONFIG = {
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger('cricket-bot')
 logging.basicConfig(
-    level=LOG_LEVEL, 
-    format='[%(levelname)s] %(asctime)s - %(message)s',
+    level=LOG_LEVEL,
+    format='[%(levelname)s] %(asctime)s %(name)s:%(lineno)d - %(message)s',
     stream=sys.stdout
 )
 logger = logging.getLogger("cricket-bot")
@@ -449,13 +448,15 @@ def db_init():
                 bigint_type = "BIGINT"
                 autoincrement = "SERIAL PRIMARY KEY"
                 bool_type = "BOOLEAN"
+                bool_default = "FALSE"  # <-- ADD THIS LINE
                 text_type = "TEXT"
                 real_type = "REAL"
-                timestamp_type = "TIMESTAMP"
-            else:
+                timestamp_type = "TIMESTAMPTZ"
+            else: # SQLite
                 bigint_type = "INTEGER"
                 autoincrement = "INTEGER PRIMARY KEY AUTOINCREMENT"
                 bool_type = "INTEGER"
+                bool_default = "0"  # <-- ADD THIS LINE
                 text_type = "TEXT"
                 real_type = "REAL"
                 timestamp_type = "TEXT"
@@ -468,7 +469,7 @@ def db_init():
                     first_name {text_type},
                     last_name {text_type},
                     language_code {text_type},
-                    is_premium {bool_type} DEFAULT 0,
+                    is_premium {bool_type} DEFAULT {bool_default},
                     coins INTEGER DEFAULT 100,
                     created_at {timestamp_type},
                     last_active {timestamp_type},
@@ -543,8 +544,8 @@ def db_init():
                     user_id {bigint_type},
                     challenge_id INTEGER,
                     progress INTEGER DEFAULT 0,
-                    completed {bool_type} DEFAULT 0,
-                    claimed {bool_type} DEFAULT 0,
+                    completed {bool_type} DEFAULT {bool_default},
+                    claimed {bool_type} DEFAULT {bool_default},
                     updated_at {timestamp_type},
                     PRIMARY KEY (user_id, challenge_id)
                 )""",
@@ -592,13 +593,13 @@ def db_init():
                     bot_sixes INTEGER DEFAULT 0,
                     extras INTEGER DEFAULT 0,
                     powerplay_overs INTEGER DEFAULT 0,
-                    is_powerplay {bool_type} DEFAULT 0,
+                    is_powerplay {bool_type} DEFAULT {bool_default},
                     weather_condition {text_type} DEFAULT 'clear',
                     pitch_condition {text_type} DEFAULT 'normal',
                     tournament_id INTEGER,
                     tournament_round INTEGER,
                     opponent_id {bigint_type},
-                    is_tournament_match {bool_type} DEFAULT 0,
+                    is_tournament_match {bool_type} DEFAULT {bool_default},
                     created_at {timestamp_type},
                     updated_at {timestamp_type}
                 )""",

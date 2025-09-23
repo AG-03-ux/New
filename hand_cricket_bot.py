@@ -3443,6 +3443,7 @@ def setup_webhook():
 @bot.message_handler(commands=['start'])
 def cmd_start(message: types.Message):
     try:
+        logger.info(f"Processing /start command from user {message.from_user.id}")
         ensure_user(message)
         welcome_text = (
             f"🏏 <b>Welcome to Cricket Bot, {message.from_user.first_name}!</b>\n\n"

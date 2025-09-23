@@ -3441,24 +3441,46 @@ def setup_webhook():
         return False
 # Message handlers
 @bot.message_handler(commands=['start'])
-def cmd_start(message: types.Message):
+def cmd_start_debug(message: types.Message):
     try:
-        logger.info(f"Processing /start command from user {message.from_user.id}")
-        ensure_user(message)
-        welcome_text = (
-            f"🏏 <b>Welcome to Cricket Bot, {message.from_user.first_name}!</b>\n\n"
-            f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
-            f"✨ <b>Features:</b>\n"
-            f"• 🎯 Multiple game formats (T1 to T20)\n"
-            f"• 🤖 Smart AI opponents\n" 
-            f"• 📊 Detailed statistics\n"
-            f"• 🎬 Live commentary\n\n"
-            f"Ready to play some cricket?"
-        )
-        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
+        logger.info(f"START: Processing /start from user {message.from_user.id}")
+        
+        # Test basic bot response first
+        try:
+            bot.send_message(message.chat.id, "Debug: Bot received /start command")
+            logger.info("START: Basic response sent successfully")
+        except Exception as e:
+            logger.error(f"START: Basic response failed: {e}")
+            return
+        
+        # Test user database operation
+        try:
+            ensure_user(message)
+            logger.info("START: User ensured in database")
+        except Exception as e:
+            logger.error(f"START: Database operation failed: {e}")
+            bot.send_message(message.chat.id, f"Database error: {str(e)}")
+            return
+        
+        # Send full welcome message
+        try:
+            welcome_text = (
+                f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
+                f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
+                f"Ready to play some cricket?"
+            )
+            bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
+            logger.info("START: Full welcome message sent")
+        except Exception as e:
+            logger.error(f"START: Welcome message failed: {e}")
+            bot.send_message(message.chat.id, "Welcome to Cricket Bot! (Simple version due to error)")
+            
     except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        bot.send_message(message.chat.id, "Welcome to Cricket Bot!")
+        logger.error(f"START: Complete handler failed: {e}", exc_info=True)
+        try:
+            bot.send_message(message.chat.id, "Error processing /start command")
+        except:
+            pass
 
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):
@@ -3821,6 +3843,13 @@ def handle_callback(call: types.CallbackQuery):
         logger.error(f"Error handling callback {call.data}: {e}")
         bot.answer_callback_query(call.id, "An error occurred. Please try again.")
 
+@bot.message_handler(func=lambda message: True)
+def catch_all_debug(message):
+    try:
+        logger.info(f"CATCH-ALL: Received unhandled message: '{message.text}' from user {message.from_user.id}")
+        bot.reply_to(message, f"Debug: Received '{message.text}' - no specific handler found. Try /start or /test")
+    except Exception as e:
+        logger.error(f"CATCH-ALL: Handler failed: {e}", exc_info=True)
 def handle_toss_result(chat_id: int, user_choice: str, user_id: int):
     try:
         toss_result = random.choice(["heads", "tails"])
@@ -3877,6 +3906,16 @@ def start_tournament_creation(chat_id: int, user_id: int):
     except Exception as e:
         logger.error(f"Error starting tournament creation: {e}")
         bot.send_message(chat_id, "❌ Error starting tournament creation.")
+
+@bot.message_handler(func=lambda message: message.text == '/test')
+def test_handler(message):
+    try:
+        logger.info(f"Test handler called for user {message.from_user.id}")
+        bot.reply_to(message, "Test successful! Bot is working.")
+        logger.info(f"Test response sent to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Test handler failed: {e}", exc_info=True)
+
 
 def handle_tournament_format_selection(chat_id: int, user_id: int, format_key: str):
     """Handle tournament format selection"""
@@ -4169,8 +4208,8 @@ def get_webhook_info():
         return {'error': str(e)}
 
 @app.route('/webhook/' + TOKEN, methods=['POST'])
-def webhook_correct():
-    """Handle webhook at the correct path"""
+def webhook_debug():
+    """Debug webhook handler"""
     try:
         if request.headers.get('content-type') == 'application/json':
             json_string = request.get_data().decode('utf-8')
@@ -4179,10 +4218,24 @@ def webhook_correct():
             update = telebot.types.Update.de_json(json_string)
             logger.info(f"Processing update ID: {update.update_id}")
             
-            # Process the update
-            bot.process_new_updates([update])
+            # Log message details
+            if update.message:
+                logger.info(f"Message text: '{update.message.text}' from user {update.message.from_user.id}")
+                logger.info(f"Chat ID: {update.message.chat.id}")
             
-            logger.info(f"Update {update.update_id} processed successfully")
+            # Process the update with error catching
+            try:
+                bot.process_new_updates([update])
+                logger.info(f"Update {update.update_id} processed successfully")
+            except Exception as e:
+                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
+                # Send a simple test response
+                try:
+                    if update.message:
+                        bot.send_message(update.message.chat.id, f"Debug: Received '{update.message.text}' but handler failed: {str(e)[:100]}")
+                except Exception as e2:
+                    logger.error(f"Even debug response failed: {e2}")
+            
             return '', 200
         else:
             logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
@@ -4190,6 +4243,35 @@ def webhook_correct():
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return 'Error processing update', 500
+
+@app.route('/test-db', methods=['GET'])
+def test_database():
+    """Test database connectivity"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            result = cur.fetchone()
+            return {'database': 'ok', 'test_result': str(result)}, 200
+    except Exception as e:
+        logger.error(f"Database test failed: {e}")
+        return {'database': 'failed', 'error': str(e)}, 500
+
+
+@app.route('/test-token', methods=['GET'])
+def test_token():
+    """Test bot token"""
+    try:
+        me = bot.get_me()
+        return {
+            'bot': 'ok',
+            'username': me.username,
+            'id': me.id,
+            'first_name': me.first_name
+        }, 200
+    except Exception as e:
+        return {'bot': 'failed', 'error': str(e)}, 500
+
 
 
 @app.route('/test', methods=['GET'])

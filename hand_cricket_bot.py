@@ -98,8 +98,23 @@ logger.info(f"USE_WEBHOOK: {USE_WEBHOOK}")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it in your environment variables or .env file")
 
-# Initialize Bot
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
+# Initialize Bot with lazy loading
+bot = None
+
+def init_bot():
+    global bot
+    if bot is None:
+        try:
+            bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
+            logger.info("Bot initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Bot initialization failed: {e}")
+            return False
+    return True
+
+# Initialize the bot
+bot_ready = init_bot()
 
 # Store user session data temporarily
 user_sessions = {}
@@ -1431,6 +1446,8 @@ class AnimationManager:
     @staticmethod
     def _send_gif_animation(chat_id: int, event_type: str, caption: str = "") -> bool:
         try:
+            if not bot:
+                return False
             gif_urls = AnimationManager.CRICKET_GIFS.get(event_type)
             if gif_urls:
                 if isinstance(gif_urls, list):
@@ -1452,6 +1469,8 @@ class AnimationManager:
     @staticmethod
     def _send_ascii_animation(chat_id: int, event_type: str, caption: str = "") -> bool:
         try:
+            if not bot:
+                return False
             ascii_frames = AnimationManager.ASCII_ANIMATIONS.get(event_type)
             if ascii_frames:
                 animation_text = "\n".join(ascii_frames)
@@ -1467,6 +1486,8 @@ class AnimationManager:
     @staticmethod
     def _send_emoji_animation(chat_id: int, event_type: str, caption: str = "") -> bool:
         try:
+            if not bot:
+                return False
             emoji_map = {
                 "six": "🚀",
                 "four": "⚡",

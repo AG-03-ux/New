@@ -30,6 +30,54 @@ import time
 # Load environment variables first
 load_dotenv()
 
+def check_environment():
+    """Check environment variables and configuration"""
+    print("=== ENVIRONMENT CHECK ===")
+    
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    print(f"1. TOKEN present: {'✓ Yes' if token else '✗ MISSING'}")
+    if token:
+        print(f"   Token length: {len(token)} chars")
+    
+    use_webhook = int(os.getenv("USE_WEBHOOK", "0"))
+    webhook_url = os.getenv("WEBHOOK_URL", "")
+    print(f"2. Webhook mode: {'✓ Enabled' if use_webhook else '✓ Polling'}")
+    if use_webhook:
+        print(f"   Webhook URL: {webhook_url if webhook_url else '✗ MISSING'}")
+    
+    db_path = os.getenv("DB_PATH", "cricket_bot.db")
+    database_url = os.getenv("DATABASE_URL")
+    print(f"3. Database: {'PostgreSQL' if database_url else 'SQLite'}")
+    print(f"   Path/URL: {database_url or db_path}")
+    
+    port = os.getenv("PORT", 5000)
+    print(f"4. Port: {port}")
+    
+    return bool(token)
+
+
+def test_bot_connection():
+    """Test bot connection to Telegram"""
+    print("\n=== BOT CONNECTION TEST ===")
+    
+    try:
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not token:
+            print("✗ No token available")
+            return False
+            
+        bot = telebot.TeleBot(token)
+        me = bot.get_me()
+        
+        print(f"✓ Bot connected successfully")
+        print(f"  Username: @{me.username}")
+        print(f"  Name: {me.first_name}")
+        print(f"  ID: {me.id}")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Bot connection failed: {e}")
+        return False
 # Environment / Config
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 USE_WEBHOOK = int(os.getenv("USE_WEBHOOK", "0"))  # Default to polling
@@ -101,6 +149,8 @@ if not TOKEN:
 # Initialize Bot with lazy loading
 bot = None
 
+
+
 def init_bot():
     global bot
     if bot is None:
@@ -141,6 +191,7 @@ def validate_environment():
         logger.warning("USE_WEBHOOK is set but WEBHOOK_URL is empty. Bot will use polling instead.")
     
     logger.info("Environment validation completed successfully")
+
 
 def get_user_session_data(user_id: int, key: str = None, default=None):
     """Get session data - FIXED VERSION"""
@@ -3503,6 +3554,18 @@ def cmd_start_debug(message: types.Message):
         except:
             pass
 
+
+@bot.message_handler(commands=['start', 'test'])
+def test_handler(message):
+    print(f"Received message from {message.from_user.id}: {message.text}")
+    bot.reply_to(message, f"Hello! I received: {message.text}")
+
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    print(f"Echo: {message.text}")
+    bot.reply_to(message, f"Echo: {message.text}")
+
+
 @bot.message_handler(commands=["help"])  
 def cmd_help(message: types.Message):
     try:
@@ -4044,6 +4107,63 @@ def handle_tournament_registration(chat_id: int, user_id: int, tournament_id: in
         logger.error(f"Error handling tournament registration: {e}")
         bot.send_message(chat_id, "❌ Error joining tournament.")
 
+
+def check_webhook_status():
+    """Check webhook status"""
+    print("\n=== WEBHOOK STATUS ===")
+    
+    try:
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not token:
+            print("✗ No token for webhook check")
+            return False
+            
+        bot = telebot.TeleBot(token)
+        info = bot.get_webhook_info()
+        
+        print(f"Current webhook URL: {info.url or 'None'}")
+        print(f"Pending updates: {info.pending_update_count}")
+        if info.last_error_message:
+            print(f"Last error: {info.last_error_message}")
+            print(f"Error date: {info.last_error_date}")
+        
+        use_webhook = int(os.getenv("USE_WEBHOOK", "0"))
+        if use_webhook and not info.url:
+            print("⚠ Webhook mode enabled but no webhook set")
+        elif not use_webhook and info.url:
+            print("⚠ Polling mode but webhook is still set")
+            
+        return True
+        
+    except Exception as e:
+        print(f"✗ Webhook check failed: {e}")
+        return False
+
+def fix_common_issues():
+    """Provide fixes for common issues"""
+    print("\n=== COMMON FIXES ===")
+    
+    # Check for rate limiting
+    print("1. Rate Limiting:")
+    print("   - Your bot has aggressive rate limiting (10 actions per 10 seconds)")
+    print("   - Consider increasing limits or removing for testing")
+    
+    # Check logging configuration
+    print("\n2. Logging Issues:")
+    print("   - You have duplicate logging configuration")
+    print("   - This can cause log duplication or missing logs")
+    
+    # Check webhook URL format
+    use_webhook = int(os.getenv("USE_WEBHOOK", "0"))
+    if use_webhook:
+        webhook_url = os.getenv("WEBHOOK_URL", "")
+        if webhook_url and not webhook_url.endswith(f"/webhook/{os.getenv('TELEGRAM_BOT_TOKEN')}"):
+            print("\n3. Webhook URL Format:")
+            print("   ✗ Webhook URL should end with '/webhook/YOUR_TOKEN'")
+            print(f"   Current: {webhook_url}")
+            print(f"   Should be: {webhook_url}/webhook/{os.getenv('TELEGRAM_BOT_TOKEN')}")\
+
+
 def handle_challenge_claim(chat_id: int, user_id: int, challenge_id: int):
     """Fixed version with proper database queries"""
     try:
@@ -4267,15 +4387,29 @@ def webhook_debug():
 
 @app.route('/test-db', methods=['GET'])
 def test_database():
-    """Test database connectivity"""
+    """Enhanced database test with better error details"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1")
             result = cur.fetchone()
-            return {'database': 'ok', 'test_result': str(result)}, 200
+            
+            # Also test if main tables exist
+            if os.getenv("DATABASE_URL"):  # PostgreSQL
+                cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_name='users'")
+            else:  # SQLite
+                cur.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='users'")
+            
+            table_exists = cur.fetchone()[0] > 0
+            
+            return {
+                'database': 'ok', 
+                'connection_test': str(result),
+                'users_table_exists': table_exists,
+                'db_type': 'postgresql' if os.getenv("DATABASE_URL") else 'sqlite'
+            }, 200
+            
     except Exception as e:
-        logger.error(f"Database test failed: {e}")
         return {'database': 'failed', 'error': str(e)}, 500
 
 

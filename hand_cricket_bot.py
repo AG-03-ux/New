@@ -133,9 +133,12 @@ LOGGING_CONFIG = {
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger('cricket-bot')
 logging.basicConfig(
-    level=LOG_LEVEL,
-    format='[%(levelname)s] %(asctime)s %(name)s:%(lineno)d - %(message)s',
-    stream=sys.stdout
+    level=logging.INFO,
+    format='[%(levelname)s] %(asctime)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('cricket_bot.log')
+    ]
 )
 logger = logging.getLogger("cricket-bot")
 
@@ -146,26 +149,19 @@ logger.info(f"USE_WEBHOOK: {USE_WEBHOOK}")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it in your environment variables or .env file")
 
-# Initialize Bot with lazy loading
-bot = None
+# Initialize Bot directly
+try:
+    bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+    bot_info = bot.get_me()
+    logger.info(f"Bot initialized: @{bot_info.username} (ID: {bot_info.id})")
+except Exception as e:
+    logger.error(f"Bot initialization failed: {e}")
+    raise RuntimeError("Cannot initialize bot - check your TOKEN")
 
 
-
-def init_bot():
-    global bot
-    if bot is None:
-        try:
-            bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=True)
-            logger.info("Bot initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Bot initialization failed: {e}")
-            return False
-    return True
-
-# Initialize the bot
-bot_ready = init_bot()
-
+# Log all registered handlers for debugging
+logger.info(f"Total message handlers registered: {len(bot.message_handlers)}")
+logger.info(f"Total callback handlers registered: {len(bot.callback_query_handlers)}")
 # Store user session data temporarily
 user_sessions = {}
 
@@ -3513,57 +3509,47 @@ def setup_webhook():
         return False
 # Message handlers
 @bot.message_handler(commands=['start'])
-def cmd_start_debug(message: types.Message):
+def cmd_start(message: types.Message):
     try:
-        logger.info(f"START: Processing /start from user {message.from_user.id}")
+        logger.info(f"Received /start from user {message.from_user.id}")
+        ensure_user(message)
         
-        # Test basic bot response first
-        try:
-            bot.send_message(message.chat.id, "Debug: Bot received /start command")
-            logger.info("START: Basic response sent successfully")
-        except Exception as e:
-            logger.error(f"START: Basic response failed: {e}")
-            return
+        welcome_text = (
+            f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
+            f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
+            f"Ready to play some cricket?"
+        )
         
-        # Test user database operation
-        try:
-            ensure_user(message)
-            logger.info("START: User ensured in database")
-        except Exception as e:
-            logger.error(f"START: Database operation failed: {e}")
-            bot.send_message(message.chat.id, f"Database error: {str(e)}")
-            return
+        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
+        logger.info(f"Welcome message sent to user {message.from_user.id}")
         
-        # Send full welcome message
-        try:
-            welcome_text = (
-                f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
-                f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
-                f"Ready to play some cricket?"
-            )
-            bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-            logger.info("START: Full welcome message sent")
-        except Exception as e:
-            logger.error(f"START: Welcome message failed: {e}")
-            bot.send_message(message.chat.id, "Welcome to Cricket Bot! (Simple version due to error)")
-            
     except Exception as e:
-        logger.error(f"START: Complete handler failed: {e}", exc_info=True)
-        try:
-            bot.send_message(message.chat.id, "Error processing /start command")
-        except:
-            pass
+        logger.error(f"Error in /start command: {e}", exc_info=True)
+        bot.send_message(message.chat.id, "Welcome to Cricket Bot! Use /play to start.")
 
 
-@bot.message_handler(commands=['start', 'test'])
-def test_handler(message):
-    print(f"Received message from {message.from_user.id}: {message.text}")
-    bot.reply_to(message, f"Hello! I received: {message.text}")
-
-@bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    print(f"Echo: {message.text}")
-    bot.reply_to(message, f"Echo: {message.text}")
+@bot.message_handler(commands=['play'])
+def cmd_play(message):
+    try:
+        logger.info(f"Received /play from user {message.from_user.id}")
+        
+        bot.send_message(
+            message.chat.id,
+            "🏏 Starting a new cricket match!\n\n"
+            "🪙 Time for the toss! Choose heads or tails:"
+        )
+        
+        # Add toss buttons
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(
+            types.InlineKeyboardButton("🪙 Heads", callback_data="toss_heads"),
+            types.InlineKeyboardButton("🪙 Tails", callback_data="toss_tails")
+        )
+        bot.send_message(message.chat.id, "Make your choice:", reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error in /play handler: {e}", exc_info=True)
+        bot.reply_to(message, "Sorry, couldn't start the game. Please try again.")
 
 
 @bot.message_handler(commands=["help"])  
@@ -3596,14 +3582,6 @@ def cmd_help(message: types.Message):
         logger.error(f"Error in help command: {e}")
         bot.send_message(message.chat.id, "Help information unavailable. Please try again later.")
 
-@bot.message_handler(commands=["play"])
-def cmd_play(message: types.Message):
-    try:
-        ensure_user(message)
-        safe_start_new_game(message.chat.id, user_id=message.from_user.id)
-    except Exception as e:
-        logger.error(f"Error in play command: {e}")
-        bot.send_message(message.chat.id, "❌ Error starting match. Please try again.")
 
 @bot.message_handler(commands=["stats"])
 def cmd_stats(message: types.Message):
@@ -3703,6 +3681,7 @@ def handle_forfeit_request(message: types.Message):
     except Exception as e:
         logger.error(f"Error handling forfeit request: {e}")
         bot.send_message(message.chat.id, "❌ Error processing your request.")
+
 
 # Callback handlers
 @bot.callback_query_handler(func=lambda call: True)
@@ -3927,13 +3906,6 @@ def handle_callback(call: types.CallbackQuery):
         logger.error(f"Error handling callback {call.data}: {e}")
         bot.answer_callback_query(call.id, "An error occurred. Please try again.")
 
-@bot.message_handler(func=lambda message: True)
-def catch_all_debug(message):
-    try:
-        logger.info(f"CATCH-ALL: Received unhandled message: '{message.text}' from user {message.from_user.id}")
-        bot.reply_to(message, f"Debug: Received '{message.text}' - no specific handler found. Try /start or /test")
-    except Exception as e:
-        logger.error(f"CATCH-ALL: Handler failed: {e}", exc_info=True)
 def handle_toss_result(chat_id: int, user_choice: str, user_id: int):
     try:
         toss_result = random.choice(["heads", "tails"])
@@ -3990,15 +3962,6 @@ def start_tournament_creation(chat_id: int, user_id: int):
     except Exception as e:
         logger.error(f"Error starting tournament creation: {e}")
         bot.send_message(chat_id, "❌ Error starting tournament creation.")
-
-@bot.message_handler(func=lambda message: message.text == '/test')
-def test_handler(message):
-    try:
-        logger.info(f"Test handler called for user {message.from_user.id}")
-        bot.reply_to(message, "Test successful! Bot is working.")
-        logger.info(f"Test response sent to user {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"Test handler failed: {e}", exc_info=True)
 
 
 def handle_tournament_format_selection(chat_id: int, user_id: int, format_key: str):
@@ -4477,41 +4440,57 @@ import time
 start_time = time.time()
 
 
-# Main execution
 if __name__ == "__main__":
     try:
+        logger.info("=" * 50)
+        logger.info("CRICKET BOT STARTING")
+        logger.info("=" * 50)
+        
+        # Validate environment
         validate_environment()
-        logger.info("=== CRICKET BOT STARTUP ===")
         
         # Initialize database
+        logger.info("Initializing database...")
         db_init()
+        logger.info("Database initialized")
         
         # Start background systems
         start_background_systems()
         
         if USE_WEBHOOK and WEBHOOK_URL:
             # Webhook mode
-            logger.info("=== STARTING WEBHOOK MODE ===")
-            if setup_webhook():
-                logger.info("Webhook configured successfully")
-            else:
-                logger.error("Webhook configuration failed")
+            logger.info(f"Starting in WEBHOOK mode with URL: {WEBHOOK_URL}")
             
+            # Remove any existing webhook first
+            bot.remove_webhook()
+            
+            # Set new webhook
+            webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}"
+            result = bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook set result: {result}")
+            
+            # Verify webhook
+            info = bot.get_webhook_info()
+            logger.info(f"Webhook active: {bool(info.url)}")
+            if info.last_error_message:
+                logger.error(f"Webhook error: {info.last_error_message}")
+            
+            # Start Flask app
             logger.info(f"Starting Flask app on port {PORT}")
             app.run(host='0.0.0.0', port=PORT, debug=False)
         else:
             # Polling mode
-            logger.info("Starting in polling mode...")
+            logger.info("Starting in POLLING mode")
+            
+            # Clear any existing webhook
             bot.remove_webhook()
-            bot.polling(none_stop=True, interval=0, timeout=20)
+            logger.info("Webhook removed, starting polling...")
+            
+            # Start polling with error handling
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
             
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
-        if not USE_WEBHOOK:
-            bot.stop_polling()
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-        # Don't exit in production - keep the service running
-        if USE_WEBHOOK:
-            logger.info("Keeping Flask app running despite error")
-            app.run(host='0.0.0.0', port=PORT, debug=False)
+        raise

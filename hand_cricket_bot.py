@@ -3683,6 +3683,15 @@ def handle_forfeit_request(message: types.Message):
         bot.send_message(message.chat.id, "❌ Error processing your request.")
 
 
+@bot.message_handler(func=lambda message: True)
+def handle_unknown_message(message: types.Message):
+    try:
+        logger.info(f"Unknown message: '{message.text}' from user {message.from_user.id}")
+        # Don't respond to every unknown message to avoid spam
+    except Exception as e:
+        logger.error(f"Error in catch-all handler: {e}")
+
+
 # Callback handlers
 @bot.callback_query_handler(func=lambda call: True)
 @rate_limit_check('callback')

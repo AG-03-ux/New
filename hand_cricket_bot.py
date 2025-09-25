@@ -146,7 +146,6 @@ logger.info("=== MODULE LOADING STARTED ===")
 logger.info(f"TOKEN present: {bool(TOKEN)}")
 logger.info(f"USE_WEBHOOK: {USE_WEBHOOK}")
 logger.info(f"Python version: {sys.version}")
-logger.info(f"Telebot version: {telebot.__version__}")
 logger.info(f"Token present: {bool(TOKEN)}")
 logger.info(f"Token length: {len(TOKEN) if TOKEN else 0}")
 
@@ -2260,7 +2259,8 @@ def safe_load_game(chat_id: int) -> Optional[Dict[str, Any]]:
         return game_state.data
     except Exception as e:
         logger.error(f"Failed to load game: {e}")
-        return None
+        # Return a default game state instead of None
+        return default_game(chat_id)
 
 def safe_save_game(chat_id: int, g: Dict[str, Any]):
     try:
@@ -3517,27 +3517,21 @@ def cmd_start(message):
     try:
         logger.info(f"Received /start from user {message.from_user.id}")
         
+        # CRITICAL: Ensure user is created first
+        ensure_user(message)
+        
         welcome_text = (
             f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
             f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
-            f"Ready to play some cricket?\n\n"
-            f"Use /play to start a quick match\n"
-            f"Use /help for more information"
+            f"Ready to play some cricket?"
         )
         
-        # Simple keyboard for testing
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton("🏏 Quick Play", callback_data="quick_play"),
-            types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats")
-        )
-        
-        bot.send_message(message.chat.id, welcome_text, reply_markup=keyboard)
+        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
         logger.info(f"Sent welcome message to {message.from_user.id}")
         
     except Exception as e:
         logger.error(f"Error in /start handler: {e}", exc_info=True)
-        bot.reply_to(message, "Sorry, an error occurred. Please try again.")
+        bot.reply_to(message, "Welcome! There was a minor issue, but you can still play. Try /play")
 
 
 @bot.message_handler(commands=['play'])
@@ -3620,11 +3614,48 @@ def cmd_score(message: types.Message):
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit() and 1 <= int(message.text) <= 6)
 def handle_game_input(message):
     try:
+        ensure_user(message)
         number = int(message.text)
-        logger.info(f"Received game input {number} from user {message.from_user.id}")
-        bot.reply_to(message, f"You played: {number} (Game logic to be implemented)")
+        chat_id = message.chat.id
+        user_id = message.from_user.id
+        
+        logger.info(f"Game input {number} from user {user_id}")
+        
+        # Check if there's an active game
+        g = safe_load_game(chat_id)
+        if not g or g.get("state") != "play":
+            bot.reply_to(message, "No active match found. Use /play to start a new match.")
+            return
+            
+        # Process the ball
+        result = enhanced_process_ball_v2(chat_id, number, user_id)
+        
+        if isinstance(result, dict):
+            # Handle the result properly
+            commentary_msg = result['commentary']
+            
+            if result.get('match_ended'):
+                bot.send_message(chat_id, commentary_msg)
+                # Match end logic handled in enhanced_process_ball_v2
+            else:
+                # Show ball result and current score
+                bot.send_message(chat_id, commentary_msg)
+                
+                if result.get('over_completed'):
+                    bot.send_message(chat_id, "🎯 Over completed!")
+                    
+                if result.get('powerplay_ended'):
+                    bot.send_message(chat_id, "⚡ Powerplay ended!")
+                    
+                # Show updated score
+                show_live_score(chat_id, result['game_state'], detailed=False)
+        else:
+            # Handle string responses (errors)
+            bot.reply_to(message, str(result))
+            
     except Exception as e:
         logger.error(f"Error in game input handler: {e}", exc_info=True)
+        bot.reply_to(message, "Error processing your move. Please try again.")
 
 @bot.message_handler(func=lambda message: message.text and "📊" in message.text)
 def handle_score_request(message: types.Message):
@@ -3663,21 +3694,105 @@ def handle_callback(call):
     try:
         logger.info(f"Received callback: {call.data} from user {call.from_user.id}")
         
-        if call.data == "quick_play":
-            bot.answer_callback_query(call.id, "Starting quick play...")
-            bot.send_message(call.message.chat.id, "🏏 Quick play starting! Use /play to begin.")
-            
-        elif call.data == "my_stats":
-            bot.answer_callback_query(call.id, "Loading stats...")
-            bot.send_message(call.message.chat.id, "📊 Stats feature coming soon!")
-            
-        elif call.data in ["toss_heads", "toss_tails"]:
-            choice = call.data.split("_")[1]
+        # ADD ALL THESE MISSING HANDLERS:
+        data = call.data
+        chat_id = call.message.chat.id
+        user_id = call.from_user.id
+        
+        # Toss handlers
+        if data in ["toss_heads", "toss_tails"]:
+            choice = data.split("_")[1]
             bot.answer_callback_query(call.id, f"You chose {choice}!")
-            bot.send_message(call.message.chat.id, f"🪙 You chose {choice}! (Game logic to be implemented)")
+            handle_toss_result(chat_id, choice, user_id)
+            
+        # Bat/Bowl choice
+        elif data in ["choose_bat", "choose_bowl"]:
+            choice = "player" if data == "choose_bat" else "bot"
+            bot.answer_callback_query(call.id, "Starting match...")
+            safe_set_batting_order(chat_id, choice)
+            
+        # Main menu handlers
+        elif data == "quick_play":
+            bot.answer_callback_query(call.id, "Starting quick play...")
+            safe_start_new_game(chat_id, user_id=user_id)
+            
+        elif data == "custom_match":
+            bot.answer_callback_query(call.id, "Custom match...")
+            bot.send_message(chat_id, "Choose difficulty:", reply_markup=kb_difficulty_select())
+            
+        elif data == "my_stats":
+            bot.answer_callback_query(call.id, "Loading stats...")
+            show_user_stats(chat_id, user_id)
+            
+        elif data == "leaderboard":
+            bot.answer_callback_query(call.id, "Loading leaderboard...")
+            show_leaderboard(chat_id)
+            
+        # Difficulty selection
+        elif data.startswith("diff_"):
+            difficulty = data.split("_")[1]
+            bot.answer_callback_query(call.id, f"Selected {difficulty} difficulty")
+            bot.send_message(chat_id, "Choose format:", reply_markup=kb_format_select())
+            set_user_session_data(user_id, "selected_difficulty", difficulty)
+            
+        # Format selection  
+        elif data.startswith("format_"):
+            parts = data.split("_")
+            if len(parts) >= 3:
+                overs = int(parts[1])
+                wickets = int(parts[2])
+                difficulty = get_user_session_data(user_id, "selected_difficulty", "medium")
+                bot.answer_callback_query(call.id, f"Starting T{overs} match...")
+                safe_start_new_game(chat_id, overs, wickets, difficulty, user_id)
+            
+        # Post-match actions
+        elif data == "play_again":
+            bot.answer_callback_query(call.id, "Starting new match...")
+            safe_start_new_game(chat_id, user_id=user_id)
+            
+        elif data == "match_summary":
+            bot.answer_callback_query(call.id, "Loading summary...")
+            # Show match summary logic here
+            
+        elif data == "forfeit_yes":
+            bot.answer_callback_query(call.id, "Match forfeited")
+            delete_game(chat_id)
+            bot.send_message(chat_id, "Match forfeited. Use /play for a new match.")
+            
+        elif data == "forfeit_no":
+            bot.answer_callback_query(call.id, "Continuing match...")
+            g = safe_load_game(chat_id)
+            if g:
+                show_live_score(chat_id, g)
+                
+        # Live score
+        elif data == "live_score":
+            bot.answer_callback_query(call.id, "Current score...")
+            g = safe_load_game(chat_id)
+            if g:
+                show_live_score(chat_id, g)
+            else:
+                bot.send_message(chat_id, "No active match found.")
+                
+        # Tournament handlers (simplified)
+        elif data == "tournaments":
+            bot.answer_callback_query(call.id, "Loading tournaments...")
+            show_tournament_menu(chat_id)
+            
+        elif data == "challenges":
+            bot.answer_callback_query(call.id, "Loading challenges...")
+            show_challenges_menu(chat_id, user_id)
+            
+        # Back to main menu
+        elif data in ["main_menu", "back_main"]:
+            bot.answer_callback_query(call.id, "Main menu")
+            welcome_text = f"🏏 Welcome back! What would you like to do?"
+            bot.send_message(chat_id, welcome_text, reply_markup=kb_main_menu())
             
         else:
-            bot.answer_callback_query(call.id, "Unknown action")
+            # Log unhandled callbacks for debugging
+            logger.warning(f"Unhandled callback: {data}")
+            bot.answer_callback_query(call.id, "Feature coming soon!")
             
     except Exception as e:
         logger.error(f"Error in callback handler: {e}", exc_info=True)
@@ -4235,45 +4350,28 @@ if __name__ == "__main__":
         # Validate environment
         validate_environment()
         
-        # Initialize database
-        logger.info("Initializing database...")
-        db_init()
-        logger.info("Database initialized")
+        # Initialize database with better error handling
+        try:
+            logger.info("Initializing database...")
+            db_init()
+            logger.info("Database initialized")
+        except Exception as e:
+            logger.error(f"Database init failed: {e}")
+            logger.info("Continuing without full database features...")
         
-        # Start background systems
-        start_background_systems()
+        # Always use polling for reliability
+        logger.info("Starting in POLLING mode (most reliable)")
         
-        if USE_WEBHOOK and WEBHOOK_URL:
-            # Webhook mode
-            logger.info(f"Starting in WEBHOOK mode with URL: {WEBHOOK_URL}")
-            
-            # Remove any existing webhook first
+        # Clear any existing webhook
+        try:
             bot.remove_webhook()
-            
-            # Set new webhook
-            webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}"
-            result = bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook set result: {result}")
-            
-            # Verify webhook
-            info = bot.get_webhook_info()
-            logger.info(f"Webhook active: {bool(info.url)}")
-            if info.last_error_message:
-                logger.error(f"Webhook error: {info.last_error_message}")
-            
-            # Start Flask app
-            logger.info(f"Starting Flask app on port {PORT}")
-            app.run(host='0.0.0.0', port=PORT, debug=False)
-        else:
-            # Polling mode
-            logger.info("Starting in POLLING mode")
-            
-            # Clear any existing webhook
-            bot.remove_webhook()
-            logger.info("Webhook removed, starting polling...")
-            
-            # Start polling with error handling
-            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+            logger.info("Webhook cleared")
+        except:
+            pass
+        
+        # Start polling
+        logger.info("Starting bot polling...")
+        bot.infinity_polling(timeout=10, long_polling_timeout=5, none_stop=True)
             
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")

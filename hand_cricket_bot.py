@@ -2406,7 +2406,6 @@ def check_innings_end(g: Dict[str, Any]) -> bool:
     
     return False
 
-@rate_limit_check('ball_input')
 def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
     """Enhanced version with tournament and challenge integration - REPLACE EXISTING"""
     if not (1 <= user_value <= 6):
@@ -2521,6 +2520,7 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
     except Exception as e:
         logger.error(f"Error processing ball for chat {chat_id}, user {user_id}: {e}", exc_info=True)
         return "An error occurred while processing your move. Please try again."
+    pass
 
 def show_live_score(chat_id: int, g: Dict[str, Any], detailed: bool = True):
     try:

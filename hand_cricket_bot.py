@@ -145,6 +145,10 @@ logger = logging.getLogger("cricket-bot")
 logger.info("=== MODULE LOADING STARTED ===")
 logger.info(f"TOKEN present: {bool(TOKEN)}")
 logger.info(f"USE_WEBHOOK: {USE_WEBHOOK}")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Telebot version: {telebot.__version__}")
+logger.info(f"Token present: {bool(TOKEN)}")
+logger.info(f"Token length: {len(TOKEN) if TOKEN else 0}")
 
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Please set it in your environment variables or .env file")
@@ -3509,23 +3513,31 @@ def setup_webhook():
         return False
 # Message handlers
 @bot.message_handler(commands=['start'])
-def cmd_start(message: types.Message):
+def cmd_start(message):
     try:
         logger.info(f"Received /start from user {message.from_user.id}")
-        ensure_user(message)
         
         welcome_text = (
             f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
             f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
-            f"Ready to play some cricket?"
+            f"Ready to play some cricket?\n\n"
+            f"Use /play to start a quick match\n"
+            f"Use /help for more information"
         )
         
-        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-        logger.info(f"Welcome message sent to user {message.from_user.id}")
+        # Simple keyboard for testing
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(
+            types.InlineKeyboardButton("🏏 Quick Play", callback_data="quick_play"),
+            types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats")
+        )
+        
+        bot.send_message(message.chat.id, welcome_text, reply_markup=keyboard)
+        logger.info(f"Sent welcome message to {message.from_user.id}")
         
     except Exception as e:
-        logger.error(f"Error in /start command: {e}", exc_info=True)
-        bot.send_message(message.chat.id, "Welcome to Cricket Bot! Use /play to start.")
+        logger.error(f"Error in /start handler: {e}", exc_info=True)
+        bot.reply_to(message, "Sorry, an error occurred. Please try again.")
 
 
 @bot.message_handler(commands=['play'])
@@ -3551,46 +3563,37 @@ def cmd_play(message):
         logger.error(f"Error in /play handler: {e}", exc_info=True)
         bot.reply_to(message, "Sorry, couldn't start the game. Please try again.")
 
-
-@bot.message_handler(commands=["help"])  
-def cmd_help(message: types.Message):
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
     try:
-        ensure_user(message)
+        logger.info(f"Received /help from user {message.from_user.id}")
         
         help_text = (
-            f"🏏 <b>Cricket Bot Help</b>\n\n"
-            f"<b>📖 How to Play:</b>\n"
-            f"• Choose numbers 1-6 for each ball\n"
-            f"• Same numbers = OUT! ❌\n"
-            f"• Different numbers = RUNS! ✅\n\n"
-            f"<b>🎮 Game Modes:</b>\n"
-            f"• Quick Play - instant T2 match\n"
-            f"• Custom Match - choose format & difficulty\n\n"
-            f"<b>⚡ Commands:</b>\n"
-            f"/play - Start quick match\n"
-            f"/stats - Your statistics  \n"
-            f"/leaderboard - Top players\n"
-            f"/help - Show this help\n\n"
-            f"<b>🎯 Tips:</b>\n"
-            f"• Use /score during match for live score\n"
-            f"• Higher difficulty = smarter AI\n"
-            f"• Complete achievements for bragging rights!"
+            "🏏 <b>Cricket Bot Help</b>\n\n"
+            "<b>Commands:</b>\n"
+            "/start - Start the bot\n"
+            "/play - Start a quick match\n"
+            "/stats - View your statistics\n"
+            "/help - Show this help message\n\n"
+            "<b>How to Play:</b>\n"
+            "• Choose numbers 1-6 for each ball\n"
+            "• Same numbers = OUT!\n"
+            "• Different numbers = RUNS!\n"
         )
         
-        bot.send_message(message.chat.id, help_text, reply_markup=kb_main_menu())
+        bot.send_message(message.chat.id, help_text)
+        
     except Exception as e:
-        logger.error(f"Error in help command: {e}")
-        bot.send_message(message.chat.id, "Help information unavailable. Please try again later.")
+        logger.error(f"Error in /help handler: {e}", exc_info=True)
 
 
-@bot.message_handler(commands=["stats"])
-def cmd_stats(message: types.Message):
+@bot.message_handler(commands=['stats'])
+def cmd_stats(message):
     try:
-        ensure_user(message)
-        show_user_stats(message.chat.id, message.from_user.id)
+        logger.info(f"Received /stats from user {message.from_user.id}")
+        bot.send_message(message.chat.id, "📊 Your stats will be shown here (feature in development)")
     except Exception as e:
-        logger.error(f"Error in stats command: {e}")
-        bot.send_message(message.chat.id, "❌ Error loading statistics.")
+        logger.error(f"Error in /stats handler: {e}", exc_info=True)
 
 @bot.message_handler(commands=["leaderboard"])
 def cmd_leaderboard(message: types.Message):
@@ -3615,42 +3618,13 @@ def cmd_score(message: types.Message):
         bot.send_message(message.chat.id, "❌ Error loading score.")
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit() and 1 <= int(message.text) <= 6)
-def handle_ball_input(message: types.Message):
+def handle_game_input(message):
     try:
-        ensure_user(message)
-        user_value = int(message.text)
-        result = enhanced_process_ball_v2(message.chat.id, user_value, message.from_user.id)
-        
-        if isinstance(result, dict) and not result.get('match_ended', False):
-            # Send commentary
-            bot.send_message(message.chat.id, result['commentary'])
-            
-            # Check for special events
-            if result['is_wicket']:
-                send_cricket_animation(message.chat.id, "wicket")
-            elif result['runs_scored'] == 6:
-                send_cricket_animation(message.chat.id, "six")
-            
-            # Check for over completion
-            if result['over_completed']:
-                over_text = f"🔄 <b>Over Complete!</b>\n\n"
-                if result['powerplay_ended']:
-                    over_text += "⚡ <b>Powerplay ended!</b>\n\n"
-                over_text += "Next over starting..."
-                bot.send_message(message.chat.id, over_text)
-            
-            # Show live score after each ball
-            show_live_score(message.chat.id, result['game_state'], detailed=False)
-            
-        elif isinstance(result, dict) and result.get('match_ended', True):
-            # Match ended, result contains the match result
-            bot.send_message(message.chat.id, result['commentary'])
-            
-        else:
-            bot.send_message(message.chat.id, result)
+        number = int(message.text)
+        logger.info(f"Received game input {number} from user {message.from_user.id}")
+        bot.reply_to(message, f"You played: {number} (Game logic to be implemented)")
     except Exception as e:
-        logger.error(f"Error handling ball input: {e}")
-        bot.send_message(message.chat.id, "❌ Error processing your move. Please try again.")
+        logger.error(f"Error in game input handler: {e}", exc_info=True)
 
 @bot.message_handler(func=lambda message: message.text and "📊" in message.text)
 def handle_score_request(message: types.Message):
@@ -3683,237 +3657,40 @@ def handle_forfeit_request(message: types.Message):
         bot.send_message(message.chat.id, "❌ Error processing your request.")
 
 
-@bot.message_handler(func=lambda message: True)
-def handle_unknown_message(message: types.Message):
-    try:
-        logger.info(f"Unknown message: '{message.text}' from user {message.from_user.id}")
-        # Don't respond to every unknown message to avoid spam
-    except Exception as e:
-        logger.error(f"Error in catch-all handler: {e}")
-
-
 # Callback handlers
 @bot.callback_query_handler(func=lambda call: True)
-@rate_limit_check('callback')
-def handle_callback(call: types.CallbackQuery):
+def handle_callback(call):
     try:
-        user_id = call.from_user.id
-        chat_id = call.message.chat.id
+        logger.info(f"Received callback: {call.data} from user {call.from_user.id}")
         
-        # Main menu callbacks
-        if call.data == "main_menu":
-            bot.edit_message_text(
-                "🏏 <b>Cricket Bot</b>\n\nWhat would you like to do?",
-                chat_id, call.message.message_id,
-                reply_markup=kb_main_menu()
-            )
-        
-        # Quick play
-        elif call.data == "quick_play":
-            safe_start_new_game(chat_id, user_id=user_id)
-            bot.answer_callback_query(call.id, "Starting new match...")
-        
-        # Custom match
-        elif call.data == "custom_match":
-            bot.edit_message_text(
-                "⚙️ <b>Custom Match Settings</b>\n\nSelect match format:",
-                chat_id, call.message.message_id,
-                reply_markup=kb_format_select()
-            )
-        
-        # Format selection
-        elif call.data.startswith("format_"):
-            if call.data == "format_random":
-                overs = random.choice([1, 2, 5, 10, 20])
-                wickets = min(5, max(1, overs // 4))
-            else:
-                parts = call.data.split("_")
-                overs = int(parts[1])
-                wickets = int(parts[2])
+        if call.data == "quick_play":
+            bot.answer_callback_query(call.id, "Starting quick play...")
+            bot.send_message(call.message.chat.id, "🏏 Quick play starting! Use /play to begin.")
             
-            set_user_session_data(user_id, "custom_overs", overs)
-            set_user_session_data(user_id, "custom_wickets", wickets)
-            
-            bot.edit_message_text(
-                f"⚙️ <b>Custom Match Settings</b>\n\n"
-                f"Format: T{overs} ({overs} overs, {wickets} wickets)\n\n"
-                f"Select difficulty level:",
-                chat_id, call.message.message_id,
-                reply_markup=kb_difficulty_select()
-            )
-        
-        # Difficulty selection
-        elif call.data.startswith("diff_"):
-            difficulty = call.data.split("_")[1]
-            overs = get_user_session_data(user_id, "custom_overs", DEFAULT_OVERS)
-            wickets = get_user_session_data(user_id, "custom_wickets", DEFAULT_WICKETS)            
-            safe_start_new_game(chat_id, overs, wickets, difficulty, user_id)
-            bot.answer_callback_query(call.id, "Starting custom match...")
-        
-        # Stats and other callbacks
         elif call.data == "my_stats":
-            show_user_stats(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "leaderboard":
-            show_leaderboard(chat_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "achievements":
-            show_achievements(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "help":
-            help_text = (
-                f"🏏 <b>Cricket Bot Help</b>\n\n"
-                f"<b>📖 How to Play:</b>\n"
-                f"• Choose numbers 1-6 for each ball\n"
-                f"• Same numbers = OUT! ❌\n"
-                f"• Different numbers = RUNS! ✅\n\n"
-                f"<b>🎮 Game Modes:</b>\n"
-                f"• Quick Play - instant T2 match\n"
-                f"• Custom Match - choose format & difficulty\n\n"
-                f"<b>⚡ Commands:</b>\n"
-                f"/play - Start quick match\n"
-                f"/stats - Your statistics\n"
-                f"/leaderboard - Top players\n"
-                f"/help - Show this help\n\n"
-                f"<b>🎯 Tips:</b>\n"
-                f"• Use 📊 Score button during match\n"
-                f"• Higher difficulty = smarter AI\n"
-                f"• Complete achievements for bragging rights!"
-            )
-            bot.edit_message_text(
-                help_text,
-                chat_id, call.message.message_id,
-                reply_markup=kb_main_menu()
-            )
-        
-        # Toss callbacks
+            bot.answer_callback_query(call.id, "Loading stats...")
+            bot.send_message(call.message.chat.id, "📊 Stats feature coming soon!")
+            
         elif call.data in ["toss_heads", "toss_tails"]:
-            user_choice = call.data.split("_")[1]
-            handle_toss_result(chat_id, user_choice, user_id)
-            bot.answer_callback_query(call.id, f"You chose {user_choice.title()}!")
-        
-        # Bat/Bowl choice
-        elif call.data == "choose_bat":
-            safe_set_batting_order(chat_id, "player")
-            bot.answer_callback_query(call.id, "You chose to bat first!")
-        
-        elif call.data == "choose_bowl":
-            safe_set_batting_order(chat_id, "bot")
-            bot.answer_callback_query(call.id, "You chose to bowl first!")
-        
-        # Match actions
-        elif call.data == "live_score":
-            g = safe_load_game(chat_id)
-            if g and g.get("state") == "play":
-                show_live_score(chat_id, g)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "forfeit_confirm":
-            bot.edit_message_text(
-                "Are you sure you want to forfeit the match?",
-                chat_id, call.message.message_id,
-                reply_markup=kb_forfeit_confirm()
-            )
-        
-        elif call.data == "forfeit_yes":
-            g = safe_load_game(chat_id)
-            if g:
-                delete_game(chat_id)
-                bot.edit_message_text(
-                    "🏳️ Match forfeited. Better luck next time!",
-                    chat_id, call.message.message_id,
-                    reply_markup=kb_main_menu()
-                )
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "forfeit_no":
-            g = safe_load_game(chat_id)
-            if g and g.get("state") == "play":
-                show_live_score(chat_id, g)
-            bot.answer_callback_query(call.id)
-        
-        # Post match actions
-        elif call.data == "play_again":
-            safe_start_new_game(chat_id, user_id=user_id)
-            bot.answer_callback_query(call.id, "Starting new match...")
-        
-        elif call.data == "match_summary":
-            bot.answer_callback_query(call.id, "Match summary feature coming soon!")
-        
-        # Back buttons
-        elif call.data == "back_main":
-            bot.edit_message_text(
-                "🏏 <b>Cricket Bot</b>\n\nWhat would you like to do?",
-                chat_id, call.message.message_id,
-                reply_markup=kb_main_menu()
-            )
-        
-        # Tournament callbacks
-        elif call.data == "tournaments":
-            show_tournament_menu(chat_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "tournament_list":
-            show_available_tournaments(chat_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "tournament_create":
-            start_tournament_creation(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "tournament_history":
-            show_user_tournament_history(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "tournament_rankings":
-            show_tournament_rankings(chat_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data.startswith("join_tournament_"):
-            tournament_id = int(call.data.split("_")[2])
-            handle_tournament_registration(chat_id, user_id, tournament_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data.startswith("tformat_"):
-            format_key = call.data.split("_")[1]
-            handle_tournament_format_selection(chat_id, user_id, format_key)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data.startswith("theme_"):
-            theme_key = call.data.split("_")[1]
-            handle_tournament_theme_selection(chat_id, user_id, theme_key)
-            bot.answer_callback_query(call.id)
-        
-        # Challenge callbacks
-        elif call.data == "challenges":
-            show_challenges_menu(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "challenges_view":
-            show_daily_challenges(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "challenges_claim":
-            claim_challenge_rewards(chat_id, user_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data.startswith("claim_"):
-            challenge_id = int(call.data.split("_")[1])
-            handle_challenge_claim(chat_id, user_id, challenge_id)
-            bot.answer_callback_query(call.id)
-        
-        elif call.data == "challenges_history":
-            show_challenge_history(chat_id, user_id)
-            bot.answer_callback_query(call.id)
+            choice = call.data.split("_")[1]
+            bot.answer_callback_query(call.id, f"You chose {choice}!")
+            bot.send_message(call.message.chat.id, f"🪙 You chose {choice}! (Game logic to be implemented)")
+            
         else:
             bot.answer_callback_query(call.id, "Unknown action")
-    
+            
     except Exception as e:
-        logger.error(f"Error handling callback {call.data}: {e}")
-        bot.answer_callback_query(call.id, "An error occurred. Please try again.")
+        logger.error(f"Error in callback handler: {e}", exc_info=True)
+        bot.answer_callback_query(call.id, "An error occurred")
+
+@bot.message_handler(func=lambda message: True)
+def handle_other_messages(message):
+    try:
+        logger.info(f"Received unhandled message: '{message.text}' from user {message.from_user.id}")
+        bot.reply_to(message, "I didn't understand that. Try /help for available commands.")
+    except Exception as e:
+        logger.error(f"Error in default handler: {e}", exc_info=True)
+
 
 def handle_toss_result(chat_id: int, user_choice: str, user_id: int):
     try:

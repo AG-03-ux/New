@@ -3483,10 +3483,11 @@ def show_achievements(chat_id: int, user_id: int):
 def ensure_user(message: types.Message):
     if message.from_user:
         try:
+            logger.info(f"Upserting user {message.from_user.id}")
             upsert_user(message.from_user)
+            logger.info(f"✓ User {message.from_user.id} upserted")
         except Exception as e:
-            logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
-
+            logger.error(f"✗ Failed to upsert user {message.from_user.id}: {e}", exc_info=True)
 
 def setup_webhook():
     """Set up webhook with proper URL format"""
@@ -3536,10 +3537,15 @@ def setup_webhook():
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     try:
-        logger.info(f"Received /start from user {message.from_user.id}")
+        logger.info(f"=== /START HANDLER TRIGGERED ===")
+        logger.info(f"User: {message.from_user.id} - {message.from_user.first_name}")
         
         # CRITICAL: Ensure user is created first
-        ensure_user(message)
+        try:
+            ensure_user(message)
+            logger.info(f"User {message.from_user.id} ensured in database")
+        except Exception as e:
+            logger.error(f"Failed to ensure user: {e}", exc_info=True)
         
         welcome_text = (
             f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
@@ -3547,12 +3553,16 @@ def cmd_start(message):
             f"Ready to play some cricket?"
         )
         
+        logger.info(f"Sending welcome message to {message.chat.id}")
         bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-        logger.info(f"Sent welcome message to {message.from_user.id}")
+        logger.info(f"✓ Welcome message sent to {message.from_user.id}")
         
     except Exception as e:
-        logger.error(f"Error in /start handler: {e}", exc_info=True)
-        bot.reply_to(message, "Welcome! There was a minor issue, but you can still play. Try /play")
+        logger.error(f"✗ Error in /start handler: {e}", exc_info=True)
+        try:
+            bot.reply_to(message, "Welcome! There was a minor issue, but you can still play. Try /play")
+        except:
+            pass
 
 
 @bot.message_handler(commands=['play'])
@@ -4160,11 +4170,6 @@ def cmd_migrate(message: types.Message):
         logger.error(f"Error running migrations: {e}")
         bot.send_message(message.chat.id, "❌ Migration failed. Check logs.")
 
-
-@bot.message_handler(func=lambda message: True)
-def catch_all(message):
-    logger.info(f"CATCH-ALL: Received message: {message.text} from {message.from_user.id}")
-    bot.reply_to(message, f"I received: {message.text}")
 # Flask app for webhook mode
 app = Flask(__name__)
 

@@ -1,5 +1,9 @@
-pyTelegramBotAPI==4.28.0
-requests
-python-dotenv
+python-telegram-bot-api
+telebot
 flask
+python-dotenv
+psycopg2-binary
+requests
+schedule
 gunicorn
+gevent

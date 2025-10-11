@@ -4441,4 +4441,8 @@ try:
         logger.info("=== BOT READY TO RECEIVE UPDATES ===")
         logger.info(f"Webhook URL: {WEBHOOK_URL}/webhook/{TOKEN[:10]}...")
 except Exception as e:
+<<<<<<< HEAD
     logger.error(f"Final webhook setup failed: {e}")
+=======
+    logger.error(f"Final webhook setup failed: {e}")
+>>>>>>> 8e1ab4a7ab8d91831161f288d210b177d3f2d29f

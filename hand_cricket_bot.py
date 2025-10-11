@@ -4342,39 +4342,22 @@ start_time = time.time()
 
 
 if __name__ == "__main__":
+    logger.info("=" * 50)
+    logger.info("CRICKET BOT STARTING (WEBHOOK MODE)")
+    logger.info("=" * 50)
+
+    # Validate environment variables and setup DB
+    validate_environment()
     try:
-        logger.info("=" * 50)
-        logger.info("CRICKET BOT STARTING")
-        logger.info("=" * 50)
-        
-        # Validate environment
-        validate_environment()
-        
-        # Initialize database with better error handling
-        try:
-            logger.info("Initializing database...")
-            db_init()
-            logger.info("Database initialized")
-        except Exception as e:
-            logger.error(f"Database init failed: {e}")
-            logger.info("Continuing without full database features...")
-        
-        # Always use polling for reliability
-        # logger.info("Starting in POLLING mode (most reliable)")
-        
-        # Clear any existing webhook
-        try:
-            bot.remove_webhook()
-            logger.info("Webhook cleared")
-        except:
-            pass
-        
-        # Start polling
-        # logger.info("Starting bot polling...")
-        # bot.infinity_polling(timeout=10, long_polling_timeout=5, none_stop=True)
-            
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Initializing database...")
+        db_init()
+        logger.info("Database initialized")
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        raise
+        logger.error(f"Database init failed: {e}")
+        logger.info("Continuing without full database features...")
+
+    # DO NOT start polling here!
+    # The Flask app will be started by gunicorn on Render.
+    # All update handling is done via webhook routes.
+
+    pass

@@ -1,3 +1,4 @@
+import math
 import os
 import logging
 import random
@@ -26,6 +27,7 @@ from enum import Enum
 import os
 from pathlib import Path
 import time
+
 
 # Load environment variables first
 load_dotenv()
@@ -1005,218 +1007,626 @@ class ChallengeType(Enum):
     QUICK_FIRE = "quick_fire"
 
 # ADD THESE NEW CLASSES AFTER YOUR EXISTING CLASSES:
-class Tournament:
-    def __init__(self, tournament_id: int = None):
-        self.id = tournament_id or self._generate_id()
-        self.name = ""
-        self.type = TournamentType.KNOCKOUT
-        self.theme = TournamentTheme.WORLD_CUP
-        self.status = TournamentStatus.UPCOMING
-        self.format = "T5"
-        self.entry_fee = 50
-        self.prize_pool = 0
-        self.max_players = 8
-        self.current_round = 1
-        self.created_by = None
-        self.created_at = datetime.now(timezone.utc)
-        self.starts_at = None
-        self.brackets = {}
-        self.participants = []
-        self.theme_data = self._get_theme_data()
-    
-    def _generate_id(self) -> int:
-        return int(time.time() * 1000) % 1000000
-    
-    def _get_theme_data(self) -> dict:
-        themes = {
-            TournamentTheme.WORLD_CUP: {
-                "emoji": "🌍",
-                "colors": ["🔵", "🟢", "🔴", "🟡"],
-                "trophy": "🏆",
-                "description": "Experience the thrill of World Cricket!",
-                "team_names": ["India", "Australia", "England", "Pakistan", "South Africa", "New Zealand", "Sri Lanka", "Bangladesh"]
-            },
-            TournamentTheme.IPL: {
-                "emoji": "🇮🇳",
-                "colors": ["🔵", "🟡", "🔴", "🟢", "🟣", "🟠"],
-                "trophy": "💎",
-                "description": "The biggest T20 extravaganza!",
-                "team_names": ["Mumbai", "Chennai", "Bangalore", "Delhi", "Kolkata", "Hyderabad", "Punjab", "Rajasthan"]
-            },
-            TournamentTheme.ASHES: {
-                "emoji": "🏏",
-                "colors": ["🔴", "🔵"],
-                "trophy": "⚱️",
-                "description": "The ultimate cricket rivalry!",
-                "team_names": ["England", "Australia"]
-            },
-            TournamentTheme.CHAMPIONS: {
-                "emoji": "⚡",
-                "colors": ["🟡", "🔵", "🔴", "🟢"],
-                "trophy": "🏆",
-                "description": "Champions Trophy - Only the best compete!",
-                "team_names": ["Team Alpha", "Team Beta", "Team Gamma", "Team Delta"]
-            },
-            TournamentTheme.CUSTOM: {
-                "emoji": "🎯",
-                "colors": ["⚪", "⚫"],
-                "trophy": "🏅",
-                "description": "Custom tournament - Your rules, your glory!",
-                "team_names": ["Team 1", "Team 2", "Team 3", "Team 4"]
-            }
-        }
-        return themes.get(self.theme, themes[TournamentTheme.CUSTOM])
-
-class TournamentManager:
-    def __init__(self):
-        self.active_tournaments = {}
-        self.scheduled_tournaments = deque()
-        self.tournament_cache = {}
-    
-    def create_tournament(self, creator_id: int, **kwargs) -> Tournament:
-        tournament = Tournament()
-        tournament.created_by = creator_id
-        tournament.name = kwargs.get('name', f"Tournament #{tournament.id}")
-        tournament.type = TournamentType(kwargs.get('type', 'knockout'))
-        tournament.theme = TournamentTheme(kwargs.get('theme', 'world_cup'))
-        tournament.format = kwargs.get('format', 'T5')
-        tournament.entry_fee = kwargs.get('entry_fee', 50)
-        tournament.max_players = kwargs.get('max_players', 8)
-        tournament.prize_pool = tournament.entry_fee * tournament.max_players + (tournament.entry_fee * 2)
-        tournament.starts_at = datetime.now(timezone.utc) + timedelta(hours=1)
-        tournament.brackets = self._generate_bracket_structure(tournament.max_players, tournament.type)
-        _save_tournament_to_db(tournament)
-        self.active_tournaments[tournament.id] = tournament
-        logger.info(f"Tournament {tournament.id} created by user {creator_id}")
-        tournament.status = TournamentStatus.REGISTRATION
-        return tournament
-    
-    def _get_tournament_participants(self, tournament_id: int) -> list:
-        return _get_tournament_participants(tournament_id)
-
-
-    def _generate_bracket_structure(self, max_players: int, tournament_type: TournamentType) -> dict:
-        if tournament_type == TournamentType.KNOCKOUT:
-            return self._generate_knockout_brackets(max_players)
-        elif tournament_type == TournamentType.LEAGUE:
-            return self._generate_league_structure(max_players)
-        else:
-            return self._generate_knockout_brackets(max_players)
-    
-    def _generate_knockout_brackets(self, max_players: int) -> dict:
-        import math
-        rounds = int(math.log2(max_players))
-        brackets = {
-            "total_rounds": rounds,
-            "matches_per_round": {},
-            "match_tree": {}
-        }
+class MatchInnings:
+    """Single innings in a tournament match with proper cricket tracking"""
+    def __init__(self, batting_team: str, overs_limit: int, wickets_limit: int):
+        self.batting_team = batting_team
+        self.overs_limit = overs_limit
+        self.wickets_limit = wickets_limit
+        self.runs = 0
+        self.wickets = 0
+        self.balls_faced = 0
+        self.overs_completed = 0
+        self.balls_in_over = 0
+        self.fours = 0
+        self.sixes = 0
+        self.extras = 0
+        self.powerplay_overs = max(2, overs_limit // 5)
+        self.is_powerplay = True
+        self.boundaries_timeline = []
+        self.wicket_timeline = []
+        self.momentum = 50  # 0-100 engagement metric
         
-        for round_num in range(1, rounds + 1):
-            matches_in_round = max_players // (2 ** round_num)
-            brackets["matches_per_round"][round_num] = max(1, matches_in_round)
-            
-            for match_num in range(1, matches_in_round + 1):
-                match_id = f"R{round_num}M{match_num}"
-                brackets["match_tree"][match_id] = {
-                    "round": round_num,
-                    "match_number": match_num,
-                    "player1_id": None,
-                    "player2_id": None,
-                    "winner_id": None,
-                    "status": "pending",
-                    "next_match": f"R{round_num+1}M{(match_num+1)//2}" if round_num < rounds else "final"
-                }
+    def add_runs(self, runs: int, is_boundary: bool = False):
+        self.runs += runs
+        self.balls_faced += 1
+        self.balls_in_over += 1
         
-        return brackets
+        if is_boundary:
+            self.boundaries_timeline.append({
+                'over': f"{self.overs_completed}.{self.balls_in_over}",
+                'runs': runs
+            })
+            if runs == 4:
+                self.fours += 1
+                self.momentum = min(100, self.momentum + 8)
+            elif runs == 6:
+                self.sixes += 1
+                self.momentum = min(100, self.momentum + 12)
+        
+        self._check_over_completion()
     
-    def _generate_league_structure(self, max_players: int) -> dict:
-        total_matches = (max_players * (max_players - 1)) // 2
+    def add_wicket(self):
+        self.wickets += 1
+        self.balls_faced += 1
+        self.balls_in_over += 1
+        self.wicket_timeline.append({
+            'over': f"{self.overs_completed}.{self.balls_in_over}"
+        })
+        self.momentum = max(0, self.momentum - 15)
+        self._check_over_completion()
+    
+    def _check_over_completion(self):
+        if self.balls_in_over >= 6:
+            self.balls_in_over = 0
+            self.overs_completed += 1
+            if self.overs_completed == self.powerplay_overs:
+                self.is_powerplay = False
+                self.momentum += 10
+    
+    def is_innings_complete(self) -> bool:
+        if self.wickets >= self.wickets_limit:
+            return True
+        if self.overs_completed >= self.overs_limit:
+            return True
+        return False
+    
+    def get_strike_rate(self) -> float:
+        if self.balls_faced == 0:
+            return 0.0
+        return (self.runs / self.balls_faced) * 100
+    
+    def get_run_rate(self) -> float:
+        overs_faced = self.overs_completed + (self.balls_in_over / 6.0)
+        if overs_faced == 0:
+            return 0.0
+        return self.runs / overs_faced
+    
+    def to_dict(self) -> Dict:
         return {
-            "type": "league",
-            "total_matches": total_matches,
-            "matches": [],
-            "points_table": {},
-            "completed_matches": 0
+            'batting_team': self.batting_team,
+            'overs_limit': self.overs_limit,
+            'wickets_limit': self.wickets_limit,
+            'runs': self.runs,
+            'wickets': self.wickets,
+            'balls_faced': self.balls_faced,
+            'overs_completed': self.overs_completed,
+            'balls_in_over': self.balls_in_over,
+            'fours': self.fours,
+            'sixes': self.sixes,
+            'powerplay_overs': self.powerplay_overs,
+            'is_powerplay': self.is_powerplay,
+            'momentum': self.momentum
         }
     
-    def register_player(self, tournament_id: int, user_id: int, chat_id: int) -> dict:
-        try:
-            tournament = self._get_tournament(tournament_id)
-            if not tournament:
-                return {"success": False, "message": "Tournament not found"}
-            
-            if tournament.status != TournamentStatus.REGISTRATION:
-                return {"success": False, "message": "Registration is closed for this tournament"}
-            
-            if user_id in tournament.participants:
-                return {"success": False, "message": "You're already registered for this tournament"}
-            
-            if len(tournament.participants) >= tournament.max_players:
-                return {"success": False, "message": "Tournament is full"}
-            
-            # Change these from self._method to module functions
-            user_coins = _get_user_coins(user_id)  # Remove self.
-            if user_coins < tournament.entry_fee:
-                return {"success": False, "message": f"Insufficient coins. Need {tournament.entry_fee} coins"}
-            
-            _deduct_user_coins(user_id, tournament.entry_fee)  # Remove self.
-            tournament.participants.append(user_id)
-            _save_tournament_participant(tournament_id, user_id, len(tournament.participants))  # Remove self.
-            
-            if len(tournament.participants) >= tournament.max_players:
-                tournament.status = TournamentStatus.ONGOING
-                _start_tournament(tournament_id)  # Remove self.
-            
-            _update_tournament_in_db(tournament)  # Remove self.
-            _send_registration_confirmation(chat_id, user_id, tournament)
+    @classmethod
+    def from_dict(cls, data: Dict):
+        obj = cls(data['batting_team'], data['overs_limit'], data['wickets_limit'])
+        obj.runs = data.get('runs', 0)
+        obj.wickets = data.get('wickets', 0)
+        obj.balls_faced = data.get('balls_faced', 0)
+        obj.overs_completed = data.get('overs_completed', 0)
+        obj.balls_in_over = data.get('balls_in_over', 0)
+        obj.fours = data.get('fours', 0)
+        obj.sixes = data.get('sixes', 0)
+        obj.powerplay_overs = data.get('powerplay_overs', 0)
+        obj.is_powerplay = data.get('is_powerplay', True)
+        obj.momentum = data.get('momentum', 50)
+        return obj
+
+
+class TournamentMatch:
+    """Complete match with full tournament integration"""
+    def __init__(self, match_id: str, team1_id: int, team2_id: int, team1_name: str, 
+                 team2_name: str, format_overs: int, format_wickets: int, tournament_stage: str):
+        self.match_id = match_id
+        self.team1 = {
+            'id': team1_id,
+            'name': team1_name,
+            'emoji': random.choice(['🔴', '🔵', '🟡', '🟢', '🟣', '🟠'])
+        }
+        self.team2 = {
+            'id': team2_id,
+            'name': team2_name,
+            'emoji': random.choice(['🔴', '🔵', '🟡', '🟢', '🟣', '🟠'])
+        }
+        
+        # Ensure different emojis
+        if self.team2['emoji'] == self.team1['emoji']:
+            self.team2['emoji'] = random.choice([e for e in ['🔴', '🔵', '🟡', '🟢', '🟣', '🟠'] 
+                                                 if e != self.team1['emoji']])
+        
+        self.format_overs = format_overs
+        self.format_wickets = format_wickets
+        self.tournament_stage = tournament_stage
+        
+        self.innings_1 = MatchInnings('team1', format_overs, format_wickets)
+        self.innings_2 = None
+        self.current_innings = 1
+        self.match_state = 'not_started'  # not_started, innings_1, innings_2, completed
+        
+        self.toss_winner = None
+        self.batting_first = None
+        self.winner = None
+        self.margin = None
+        self.margin_type = None
+        
+        self.ball_count = 0
+        self.key_moments = []
+        self.weather = random.choice(['clear', 'overcast', 'windy', 'light_rain'])
+        self.pitch = random.choice(['flat', 'bowler_friendly', 'spin_friendly'])
+        
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.started_at = None
+        self.ended_at = None
+    
+    def start_match(self, toss_winner: str, batting_first: str):
+        self.toss_winner = toss_winner
+        self.batting_first = batting_first
+        self.match_state = 'innings_1'
+        self.started_at = datetime.now(timezone.utc).isoformat()
+    
+    def record_ball(self, outcome: str, runs: int = 0) -> Dict[str, Any]:
+        """Record a delivery - outcome: 'runs', 'wicket', or 'dot'"""
+        self.ball_count += 1
+        current_innings = self.innings_1 if self.current_innings == 1 else self.innings_2
+        
+        if outcome == 'runs':
+            is_boundary = runs in [4, 6]
+            current_innings.add_runs(runs, is_boundary)
+            if runs == 4:
+                self.key_moments.append({'type': 'boundary_4', 'ball': self.ball_count})
+            elif runs == 6:
+                self.key_moments.append({'type': 'boundary_6', 'ball': self.ball_count})
+        
+        elif outcome == 'wicket':
+            current_innings.add_wicket()
+            self.key_moments.append({'type': 'wicket', 'ball': self.ball_count})
+        
+        elif outcome == 'dot':
+            current_innings.balls_faced += 1
+            current_innings.balls_in_over += 1
+            current_innings._check_over_completion()
+        
+        # Check if innings complete
+        if current_innings.is_innings_complete():
+            return self._handle_innings_end()
+        
+        return {
+            'success': True,
+            'ball_recorded': True,
+            'current_score': current_innings.runs,
+            'current_wickets': current_innings.wickets,
+            'momentum': current_innings.momentum
+        }
+    
+    def _handle_innings_end(self) -> Dict[str, Any]:
+        if self.current_innings == 1:
+            self.innings_2 = MatchInnings('team2', self.format_overs, self.format_wickets)
+            self.current_innings = 2
+            self.match_state = 'innings_2'
             
             return {
-                "success": True, 
-                "message": f"Successfully registered! ({len(tournament.participants)}/{tournament.max_players} players)",
-                "tournament": tournament
+                'innings_ended': True,
+                'innings_number': 1,
+                'runs_scored': self.innings_1.runs,
+                'wickets_lost': self.innings_1.wickets,
+                'next_state': 'innings_2_start',
+                'target': self.innings_1.runs + 1
+            }
+        else:
+            return self._determine_winner()
+    
+    def _determine_winner(self) -> Dict[str, Any]:
+        self.match_state = 'completed'
+        self.ended_at = datetime.now(timezone.utc).isoformat()
+        
+        team1_runs = self.innings_1.runs
+        team2_runs = self.innings_2.runs
+        
+        if team2_runs > team1_runs:
+            self.winner = 'team2'
+            self.margin = team2_runs - team1_runs
+            self.margin_type = 'runs'
+        elif team1_runs > team2_runs:
+            self.winner = 'team1'
+            self.margin = self.format_wickets - self.innings_2.wickets
+            self.margin_type = 'wickets'
+        else:
+            self.winner = 'tie'
+            self.margin = 0
+            self.margin_type = 'tie'
+        
+        return {
+            'match_completed': True,
+            'winner': self.winner,
+            'margin': self.margin,
+            'margin_type': self.margin_type,
+            'team1_score': f"{team1_runs}/{self.innings_1.wickets}",
+            'team2_score': f"{team2_runs}/{self.innings_2.wickets}"
+        }
+    
+    def get_scorecard(self) -> str:
+        scorecard = (
+            f"{'='*50}\n"
+            f"  {self.tournament_stage} - {self.match_id}\n"
+            f"{'='*50}\n\n"
+            f"{self.team1['emoji']} {self.team1['name']}\n"
+            f"  {self.innings_1.runs}/{self.innings_1.wickets} "
+            f"({self.innings_1.overs_completed}.{self.innings_1.balls_in_over} ov)\n"
+            f"  4️⃣: {self.innings_1.fours} | 6️⃣: {self.innings_1.sixes} | "
+            f"SR: {self.innings_1.get_strike_rate():.1f}%\n\n"
+            f"{self.team2['emoji']} {self.team2['name']}\n"
+        )
+        
+        if self.innings_2:
+            scorecard += (
+                f"  {self.innings_2.runs}/{self.innings_2.wickets} "
+                f"({self.innings_2.overs_completed}.{self.innings_2.balls_in_over} ov)\n"
+                f"  4️⃣: {self.innings_2.fours} | 6️⃣: {self.innings_2.sixes} | "
+                f"SR: {self.innings_2.get_strike_rate():.1f}%\n"
+            )
+            
+            if self.match_state == 'innings_2':
+                target = self.innings_1.runs + 1
+                need = max(0, target - self.innings_2.runs)
+                scorecard += f"\n  🎯 Target: {target} | Need: {need}\n"
+        
+        if self.match_state == 'completed':
+            scorecard += f"\n{'='*50}\n"
+            if self.winner == 'team1':
+                scorecard += f"🏆 {self.team1['name']} wins by {self.margin} {self.margin_type}!\n"
+            elif self.winner == 'team2':
+                scorecard += f"🏆 {self.team2['name']} wins by {self.margin} {self.margin_type}!\n"
+            else:
+                scorecard += f"🤝 Match Tied!\n"
+            scorecard += f"{'='*50}"
+        
+        return scorecard
+    
+    def to_dict(self) -> Dict:
+        return {
+            'match_id': self.match_id,
+            'team1': self.team1,
+            'team2': self.team2,
+            'format_overs': self.format_overs,
+            'format_wickets': self.format_wickets,
+            'tournament_stage': self.tournament_stage,
+            'innings_1': self.innings_1.to_dict(),
+            'innings_2': self.innings_2.to_dict() if self.innings_2 else None,
+            'current_innings': self.current_innings,
+            'match_state': self.match_state,
+            'toss_winner': self.toss_winner,
+            'batting_first': self.batting_first,
+            'winner': self.winner,
+            'margin': self.margin,
+            'margin_type': self.margin_type,
+            'ball_count': self.ball_count,
+            'key_moments': self.key_moments,
+            'weather': self.weather,
+            'pitch': self.pitch,
+            'created_at': self.created_at,
+            'started_at': self.started_at,
+            'ended_at': self.ended_at
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict):
+        obj = cls(
+            data['match_id'],
+            data['team1']['id'],
+            data['team2']['id'],
+            data['team1']['name'],
+            data['team2']['name'],
+            data['format_overs'],
+            data['format_wickets'],
+            data['tournament_stage']
+        )
+        obj.team1 = data['team1']
+        obj.team2 = data['team2']
+        obj.innings_1 = MatchInnings.from_dict(data['innings_1'])
+        obj.innings_2 = MatchInnings.from_dict(data['innings_2']) if data.get('innings_2') else None
+        obj.current_innings = data.get('current_innings', 1)
+        obj.match_state = data.get('match_state', 'not_started')
+        obj.toss_winner = data.get('toss_winner')
+        obj.batting_first = data.get('batting_first')
+        obj.winner = data.get('winner')
+        obj.margin = data.get('margin')
+        obj.margin_type = data.get('margin_type')
+        obj.ball_count = data.get('ball_count', 0)
+        obj.key_moments = data.get('key_moments', [])
+        obj.weather = data.get('weather', 'clear')
+        obj.pitch = data.get('pitch', 'flat')
+        obj.created_at = data.get('created_at')
+        obj.started_at = data.get('started_at')
+        obj.ended_at = data.get('ended_at')
+        return obj
+
+
+class EliteTournament:
+    """Main tournament orchestration"""
+    def __init__(self, tournament_id: str, name: str, tournament_type: str, theme: str, 
+                 format_overs: int, format_wickets: int, created_by: int):
+        self.tournament_id = tournament_id
+        self.name = name
+        self.type = tournament_type  # 'knockout' or 'league'
+        self.theme = theme
+        self.format_overs = format_overs
+        self.format_wickets = format_wickets
+        self.created_by = created_by
+        
+        self.participants = []
+        self.matches = []
+        self.current_round = 1
+        self.total_rounds = 0
+        self.tournament_state = 'registration'  # registration, live, completed
+        
+        self.bracket = {}  # For knockout
+        self.standings = {}
+        
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.started_at = None
+        self.ended_at = None
+        
+        self.theme_data = self._get_theme_data()
+        self.records = {
+            'highest_score': 0,
+            'fastest_fifty': 0,
+            'most_sixes': 0,
+            'most_boundaries': 0
+        }
+    
+    def _get_theme_data(self) -> Dict:
+        themes = {
+            'world_cup': {
+                'emoji': '🌍',
+                'colors': ['🔵', '🟢', '🔴', '🟡'],
+                'trophy': '🏆',
+                'stage_names': {
+                    1: 'Group Stage', 2: 'Quarter Finals', 3: 'Semi Finals', 4: 'Final'
+                },
+                'teams': ['India', 'Australia', 'England', 'Pakistan', 'South Africa', 
+                         'New Zealand', 'Sri Lanka', 'Bangladesh']
+            },
+            'ipl': {
+                'emoji': '🇮🇳',
+                'colors': ['🔵', '🟡', '🔴', '🟢', '🟣', '🟠'],
+                'trophy': '💎',
+                'stage_names': {
+                    1: 'League Stage', 2: 'Qualifiers', 3: 'Final'
+                },
+                'teams': ['Mumbai', 'Chennai', 'Bangalore', 'Delhi', 'Kolkata', 
+                         'Hyderabad', 'Punjab', 'Rajasthan']
+            },
+            'champions': {
+                'emoji': '⚡',
+                'colors': ['🟡', '🔵', '🔴', '🟢'],
+                'trophy': '👑',
+                'stage_names': {
+                    1: 'Round 1', 2: 'Semi Final', 3: 'Championship'
+                },
+                'teams': ['Thunder', 'Phoenix', 'Dragons', 'Eagles', 'Tigers', 'Warriors']
+            }
+        }
+        return themes.get(self.theme, themes['world_cup'])
+    
+    def add_participant(self, user_id: int, username: str) -> Dict:
+        if len(self.participants) >= 16:
+            return {'success': False, 'message': 'Tournament is full'}
+        
+        if any(p['user_id'] == user_id for p in self.participants):
+            return {'success': False, 'message': 'Already registered'}
+        
+        participant = {
+            'user_id': user_id,
+            'username': username,
+            'avatar': random.choice(self.theme_data['colors']),
+            'matches_played': 0,
+            'wins': 0,
+            'losses': 0,
+            'ties': 0,
+            'runs_scored': 0,
+            'wickets_taken': 0,
+            'highest_score': 0
+        }
+        
+        self.participants.append(participant)
+        self.standings[user_id] = {
+            'points': 0,
+            'matches': 0,
+            'wins': 0,
+            'losses': 0,
+            'nrr': 0.0
+        }
+        
+        return {
+            'success': True,
+            'message': f'Welcome to {self.name}!',
+            'participants': f'{len(self.participants)}/16'
+        }
+    
+    def start_tournament(self) -> Dict:
+        if len(self.participants) < 2:
+            return {'success': False, 'message': 'Need at least 2 participants'}
+        
+        self.tournament_state = 'live'
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        
+        if self.type == 'knockout':
+            self._create_knockout_bracket()
+        else:
+            self._create_league()
+        
+        return {'success': True, 'message': 'Tournament started!'}
+    
+    def _create_knockout_bracket(self):
+        num_teams = len(self.participants)
+        num_rounds = int(math.ceil(math.log2(num_teams)))
+        self.total_rounds = num_rounds
+        
+        self.bracket = {'rounds': {}}
+        
+        for round_num in range(1, num_rounds + 1):
+            matches_in_round = 2 ** (num_rounds - round_num)
+            stage_name = self.theme_data['stage_names'].get(
+                round_num, f'Round {round_num}'
+            )
+            
+            self.bracket['rounds'][round_num] = {
+                'matches': [],
+                'stage': stage_name
             }
             
-        except Exception as e:
-            logger.error(f"Error registering player {user_id} for tournament {tournament_id}: {e}")
-            return {"success": False, "message": "Registration failed. Please try again."}
-    
-    
-    def _get_tournament(self, tournament_id: int) -> Tournament:
-        if tournament_id in self.active_tournaments:
-            return self.active_tournaments[tournament_id]
-        
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                is_postgres = bool(os.getenv("DATABASE_URL"))
-                
-                if is_postgres:
-                    cur.execute("SELECT * FROM tournaments WHERE id = %s", (tournament_id,))
+            for match_num in range(matches_in_round):
+                # In first round, pair consecutive participants
+                if round_num == 1:
+                    team1_idx = match_num * 2
+                    team2_idx = match_num * 2 + 1
+                    
+                    if team1_idx < len(self.participants) and team2_idx < len(self.participants):
+                        team1 = self.participants[team1_idx]
+                        team2 = self.participants[team2_idx]
+                        
+                        match = TournamentMatch(
+                            f"R{round_num}M{match_num + 1}",
+                            team1['user_id'],
+                            team2['user_id'],
+                            team1['username'],
+                            team2['username'],
+                            self.format_overs,
+                            self.format_wickets,
+                            stage_name
+                        )
+                        self.bracket['rounds'][round_num]['matches'].append(match)
+                        self.matches.append(match)
                 else:
-                    cur.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,))
-                
-                row = cur.fetchone()
-                if row:
-                    tournament = Tournament(tournament_id)
-                    tournament.name = row["name"]
-                    tournament.type = TournamentType(row["type"])
-                    tournament.theme = TournamentTheme(row["theme"])
-                    tournament.status = TournamentStatus(row["status"])
-                    tournament.format = row["format"]
-                    tournament.entry_fee = row["entry_fee"]
-                    tournament.prize_pool = row["prize_pool"]
-                    tournament.max_players = row["max_players"]
-                    tournament.current_round = row["current_round"]
-                    tournament.created_by = row["created_by"]
-                    tournament.brackets = json.loads(row["brackets"]) if row["brackets"] else {}
-                    tournament.participants = self._get_tournament_participants(tournament_id)
-                    self.active_tournaments[tournament_id] = tournament
-                    return tournament
-        except Exception as e:
-            logger.error(f"Error getting tournament {tournament_id}: {e}")
+                    # Subsequent rounds will be filled as previous round completes
+                    match = TournamentMatch(
+                        f"R{round_num}M{match_num + 1}",
+                        None,
+                        None,
+                        f"Winner {(match_num * 2) + 1}",
+                        f"Winner {(match_num * 2) + 2}",
+                        self.format_overs,
+                        self.format_wickets,
+                        stage_name
+                    )
+                    self.bracket['rounds'][round_num]['matches'].append(match)
+                    self.matches.append(match)
+    
+    def _create_league(self):
+        num_teams = len(self.participants)
         
-        return None
+        for i in range(num_teams):
+            for j in range(i + 1, num_teams):
+                team1 = self.participants[i]
+                team2 = self.participants[j]
+                
+                match = TournamentMatch(
+                    f"L{len(self.matches) + 1}",
+                    team1['user_id'],
+                    team2['user_id'],
+                    team1['username'],
+                    team2['username'],
+                    self.format_overs,
+                    self.format_wickets,
+                    'League'
+                )
+                self.matches.append(match)
+        
+        self.total_rounds = 1
+    
+    def get_standings(self) -> str:
+        sorted_standings = sorted(
+            [(p, self.standings.get(p['user_id'], {})) for p in self.participants],
+            key=lambda x: (x[1].get('points', 0), x[1].get('wins', 0)),
+            reverse=True
+        )
+        
+        standings_text = (
+            f"{'='*50}\n"
+            f"  {self.name.upper()}\n"
+            f"  Status: {self.tournament_state.upper()}\n"
+            f"{'='*50}\n\n"
+        )
+        
+        for idx, (participant, stats) in enumerate(sorted_standings, 1):
+            medal = '🥇' if idx == 1 else '🥈' if idx == 2 else '🥉' if idx == 3 else f'{idx}.'
+            points = stats.get('points', 0)
+            wins = stats.get('wins', 0)
+            
+            standings_text += (
+                f"{medal} {participant['avatar']} {participant['username']}\n"
+                f"   Points: {points} | Wins: {wins} | Matches: {stats.get('matches', 0)}\n"
+            )
+        
+        return standings_text
+    
+    def update_standings_after_match(self, match: TournamentMatch):
+        """Update tournament standings after match completion"""
+        if match.winner == 'team1':
+            self._award_points(match.team1['id'], 2)  # 2 points for win
+            self._increment_wins(match.team1['id'])
+        elif match.winner == 'team2':
+            self._award_points(match.team2['id'], 2)
+            self._increment_wins(match.team2['id'])
+        else:
+            self._award_points(match.team1['id'], 1)  # 1 point for tie
+            self._award_points(match.team2['id'], 1)
+    
+    def _award_points(self, user_id: int, points: int):
+        if user_id in self.standings:
+            self.standings[user_id]['points'] += points
+            self.standings[user_id]['matches'] += 1
+    
+    def _increment_wins(self, user_id: int):
+        if user_id in self.standings:
+            self.standings[user_id]['wins'] += 1
+    
+    def to_dict(self) -> Dict:
+        return {
+            'tournament_id': self.tournament_id,
+            'name': self.name,
+            'type': self.type,
+            'theme': self.theme,
+            'format_overs': self.format_overs,
+            'format_wickets': self.format_wickets,
+            'created_by': self.created_by,
+            'participants': self.participants,
+            'current_round': self.current_round,
+            'total_rounds': self.total_rounds,
+            'tournament_state': self.tournament_state,
+            'matches': [m.to_dict() for m in self.matches],
+            'standings': self.standings,
+            'created_at': self.created_at,
+            'started_at': self.started_at,
+            'ended_at': self.ended_at,
+            'records': self.records
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict):
+        obj = cls(
+            data['tournament_id'],
+            data['name'],
+            data['type'],
+            data['theme'],
+            data['format_overs'],
+            data['format_wickets'],
+            data['created_by']
+        )
+        obj.participants = data.get('participants', [])
+        obj.current_round = data.get('current_round', 1)
+        obj.total_rounds = data.get('total_rounds', 0)
+        obj.tournament_state = data.get('tournament_state', 'registration')
+        obj.matches = [TournamentMatch.from_dict(m) for m in data.get('matches', [])]
+        obj.standings = data.get('standings', {})
+        obj.created_at = data.get('created_at')
+        obj.started_at = data.get('started_at')
+        obj.ended_at = data.get('ended_at')
+        obj.records = data.get('records', {})
+        return obj
+
 
 class DailyChallenge:
     def __init__(self, challenge_id: int = None):
@@ -1706,49 +2116,44 @@ class UserLevelManager:
         except Exception as e:
             logger.error(f"Error awarding coins: {e}")
 
-tournament_manager = TournamentManager()
 
-def _save_tournament_to_db(tournament: Tournament):
-    """Fixed version with proper parameter handling"""
+def save_tournament_to_db(tournament: EliteTournament, chat_id: int = None):
+    """Save tournament state to database"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            tournament_json = json.dumps(tournament.to_dict())
             now = datetime.now(timezone.utc).isoformat()
             
             if is_postgres:
                 cur.execute("""
-                    INSERT INTO tournaments (
-                        id, name, type, theme, status, format, entry_fee, prize_pool,
-                        max_players, current_round, created_by, created_at, starts_at,
-                        ends_at, winner_id, runner_up_id, brackets, metadata
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    tournament.id, tournament.name, tournament.type.value,
-                    tournament.theme.value, tournament.status.value, tournament.format,
-                    tournament.entry_fee, tournament.prize_pool, tournament.max_players,
-                    tournament.current_round, tournament.created_by, now,
-                    tournament.starts_at.isoformat() if tournament.starts_at else None,
-                    None, None, None, json.dumps(tournament.brackets), "{}"
-                ))
+                    INSERT INTO tournaments (name, type, theme, status, format, entry_fee, prize_pool,
+                                           max_players, created_by, created_at, brackets, metadata)
+                    VALUES (%s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                    brackets = EXCLUDED.brackets, metadata = EXCLUDED.metadata
+                    RETURNING id
+                """, (tournament.name, tournament.type, tournament.theme, 
+                      tournament.tournament_state, f"T{tournament.format_overs}",
+                      len(tournament.participants), tournament.created_by, now,
+                      json.dumps(tournament.bracket), tournament_json))
             else:
                 cur.execute("""
-                    INSERT INTO tournaments (
-                        id, name, type, theme, status, format, entry_fee, prize_pool,
-                        max_players, current_round, created_by, created_at, starts_at,
-                        ends_at, winner_id, runner_up_id, brackets, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    tournament.id, tournament.name, tournament.type.value,
-                    tournament.theme.value, tournament.status.value, tournament.format,
-                    tournament.entry_fee, tournament.prize_pool, tournament.max_players,
-                    tournament.current_round, tournament.created_by, now,
-                    tournament.starts_at.isoformat() if tournament.starts_at else None,
-                    None, None, None, json.dumps(tournament.brackets), "{}"
-                ))
-                
+                    INSERT OR REPLACE INTO tournaments 
+                    (name, type, theme, status, format, entry_fee, prize_pool,
+                     max_players, created_by, created_at, brackets, metadata)
+                    VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+                """, (tournament.name, tournament.type, tournament.theme,
+                      tournament.tournament_state, f"T{tournament.format_overs}",
+                      len(tournament.participants), tournament.created_by, now,
+                      json.dumps(tournament.bracket), tournament_json))
+            
+            logger.info(f"Tournament {tournament.tournament_id} saved to database")
+            
     except Exception as e:
-        logger.error(f"Error saving tournament to database: {e}")
+        logger.error(f"Error saving tournament: {e}")
 
 def _get_tournament_participants(tournament_id: int) -> list:
     try:
@@ -1771,6 +2176,31 @@ def _get_tournament_participants(tournament_id: int) -> list:
     except Exception as e:
         logger.error(f"Error getting tournament participants: {e}")
         return []
+
+def load_tournament_from_db(tournament_id: str) -> Optional[EliteTournament]:
+    """Load tournament from database"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            if is_postgres:
+                cur.execute(f"SELECT metadata FROM tournaments WHERE id = {param_style}", (tournament_id,))
+            else:
+                cur.execute(f"SELECT metadata FROM tournaments WHERE id = {param_style}", (tournament_id,))
+            
+            row = cur.fetchone()
+            if row and row.get('metadata'):
+                data = json.loads(row['metadata'])
+                return EliteTournament.from_dict(data)
+            
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error loading tournament: {e}")
+        return None
+    
 
 def _save_tournament_participant(tournament_id: int, user_id: int, position: int):
     try:
@@ -1816,7 +2246,7 @@ def _deduct_user_coins(user_id: int, amount: int):
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
             
-            cur.execute(f"UPDATE users SET coins = coins - {param_style} WHERE user_id = {param_style}", (amount, user_id))
+            cur.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (amount, user_id))
     except Exception as e:
         logger.error(f"Error deducting user coins: {e}")
 
@@ -1909,8 +2339,18 @@ def create_scheduled_tournament():
                 "max_players": 8
             }
             
-            tournament = tournament_manager.create_tournament(0, **tournament_data)
-            logger.info(f"Created daily tournament: {tournament.id}")
+            tournament_id = str(int(time.time() * 1000))
+            tournament = EliteTournament(
+                tournament_id,
+                tournament_data.get("name", "Weekly Championship"),
+                tournament_data.get("type", "knockout"),
+                tournament_data.get("theme", "champions"),
+                tournament_data.get("overs", 20),
+                10,
+                0
+            )
+            save_tournament_to_db(tournament)
+            logger.info(f"Created weekly championship: {tournament.id}")
             announce_new_tournament(tournament.id)
         
         if now.weekday() == 6 and now.hour == 15 and now.minute == 0:
@@ -1923,7 +2363,17 @@ def create_scheduled_tournament():
                 "max_players": 16
             }
             
-            tournament = tournament_manager.create_tournament(0, **tournament_data)
+            tournament_id = str(int(time.time() * 1000))
+            tournament = EliteTournament(
+                tournament_id,
+                tournament_data.get("name", "Weekly Championship"),
+                tournament_data.get("type", "knockout"),
+                tournament_data.get("theme", "champions"),
+                tournament_data.get("overs", 20),
+                10,
+                0
+            )
+            save_tournament_to_db(tournament)
             logger.info(f"Created weekly championship: {tournament.id}")
             announce_new_tournament(tournament.id)
             
@@ -1932,7 +2382,7 @@ def create_scheduled_tournament():
 
 def announce_new_tournament(tournament_id: int):
     try:
-        tournament = tournament_manager._get_tournament(tournament_id)
+        tournament = load_tournament_from_db(tournament_id)
         if not tournament:
             return
         
@@ -2019,81 +2469,243 @@ def kb_level_up() -> types.InlineKeyboardMarkup:
     kb.add(types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu"))
     return kb
 
-# ADD THESE DISPLAY FUNCTIONS:
-def show_tournament_menu(chat_id: int):
-    try:
-        menu_text = (
-            f"🏆 <b>Tournament Hub</b>\n\n"
-            f"🎮 Join exciting tournaments and compete with players worldwide!\n"
-            f"🏅 Earn exclusive rewards and climb the rankings!\n\n"
-            f"What would you like to do?"
+def generate_live_match_display(match: TournamentMatch) -> str:
+    """Create engaging live match display"""
+    current_innings = match.innings_1 if match.current_innings == 1 else match.innings_2
+    
+    momentum_bar = '█' * (current_innings.momentum // 5) + '░' * ((100 - current_innings.momentum) // 5)
+    
+    display = (
+        f"╔{'═'*48}╗\n"
+        f"║  {match.tournament_stage:<44}  ║\n"
+        f"║  Match: {match.match_id:<38}  ║\n"
+        f"╚{'═'*48}╝\n\n"
+        f"{match.team1['emoji']} {match.team1['name']}\n"
+        f"   Runs: {match.innings_1.runs:3d} | Wickets: {match.innings_1.wickets}\n"
+        f"   Overs: {match.innings_1.overs_completed}.{match.innings_1.balls_in_over}/{match.format_overs}\n"
+        f"   Boundaries: 4️⃣ {match.innings_1.fours} | 6️⃣ {match.innings_1.sixes}\n"
+        f"   Strike Rate: {match.innings_1.get_strike_rate():.1f}%\n\n"
+        f"{match.team2['emoji']} {match.team2['name']}\n"
+    )
+    
+    if match.current_innings == 2 and match.innings_2:
+        target = match.innings_1.runs + 1
+        need = max(0, target - match.innings_2.runs)
+        
+        display += (
+            f"   Runs: {match.innings_2.runs:3d} | Wickets: {match.innings_2.wickets}\n"
+            f"   Overs: {match.innings_2.overs_completed}.{match.innings_2.balls_in_over}/{match.format_overs}\n"
+            f"   Boundaries: 4️⃣ {match.innings_2.fours} | 6️⃣ {match.innings_2.sixes}\n"
+            f"   Strike Rate: {match.innings_2.get_strike_rate():.1f}%\n\n"
+            f"   🎯 Target: {target} | Need: {need}\n"
         )
-        bot.send_message(chat_id, menu_text, reply_markup=kb_tournament_menu())
-    except Exception as e:
-        logger.error(f"Error showing tournament menu: {e}")
-        bot.send_message(chat_id, "❌ Error loading tournament menu.")
+    
+    display += (
+        f"\n⚡ MOMENTUM: [{momentum_bar}] {current_innings.momentum}%\n"
+        f"🌤️ Weather: {match.weather.title()} | 🏟️ Pitch: {match.pitch.title()}\n"
+        f"⚡ Powerplay: {'✅ ACTIVE' if current_innings.is_powerplay else '❌ Ended'}\n"
+    )
+    
+    return display
 
-def show_available_tournaments(chat_id: int):
+
+def generate_match_summary(match: TournamentMatch) -> str:
+    """Create post-match summary"""
+    summary = (
+        f"╔{'═'*48}╗\n"
+        f"║  MATCH SUMMARY - {match.match_id:<31}  ║\n"
+        f"╚{'═'*48}╝\n\n"
+        f"{match.team1['emoji']} {match.team1['name']}\n"
+        f"   {match.innings_1.runs}/{match.innings_1.wickets} "
+        f"({match.innings_1.overs_completed}.{match.innings_1.balls_in_over} overs)\n"
+        f"   4️⃣: {match.innings_1.fours} | 6️⃣: {match.innings_1.sixes}\n"
+        f"   SR: {match.innings_1.get_strike_rate():.1f}%\n\n"
+        f"{match.team2['emoji']} {match.team2['name']}\n"
+        f"   {match.innings_2.runs}/{match.innings_2.wickets} "
+        f"({match.innings_2.overs_completed}.{match.innings_2.balls_in_over} overs)\n"
+        f"   4️⃣: {match.innings_2.fours} | 6️⃣: {match.innings_2.sixes}\n"
+        f"   SR: {match.innings_2.get_strike_rate():.1f}%\n\n"
+    )
+    
+    if match.winner == 'team1':
+        summary += f"🏆 {match.team1['name']} wins by {match.margin} {match.margin_type}!\n"
+    elif match.winner == 'team2':
+        summary += f"🏆 {match.team2['name']} wins by {match.margin} {match.margin_type}!\n"
+    else:
+        summary += "🤝 Match Tied!\n"
+    
+    if match.key_moments:
+        summary += "\n📊 Key Moments:\n"
+        for moment in match.key_moments[:5]:
+            if moment['type'] == 'boundary_4':
+                summary += f"   ⚡ Ball {moment['ball']}: FOUR!\n"
+            elif moment['type'] == 'boundary_6':
+                summary += f"   💣 Ball {moment['ball']}: SIX!\n"
+            elif moment['type'] == 'wicket':
+                summary += f"   💥 Ball {moment['ball']}: WICKET!\n"
+    
+    return summary
+
+
+def generate_tournament_bracket(tournament: EliteTournament) -> str:
+    """Display tournament bracket"""
+    bracket_text = (
+        f"{tournament.theme_data['emoji']} {tournament.name.upper()}\n"
+        f"Type: {tournament.type.upper()} | Status: {tournament.tournament_state.upper()}\n"
+        f"{'='*50}\n\n"
+    )
+    
+    if tournament.type == 'knockout' and tournament.bracket:
+        for round_num in sorted(tournament.bracket['rounds'].keys()):
+            round_data = tournament.bracket['rounds'][round_num]
+            bracket_text += f"🎯 {round_data['stage']}\n"
+            
+            for match in round_data['matches']:
+                if match.match_state == 'completed':
+                    status = '✅' if match.winner else '⚽'
+                    winner = match.team1['name'] if match.winner == 'team1' else match.team2['name']
+                    bracket_text += f"   {status} {match.team1['name']} vs {match.team2['name']}\n"
+                    bracket_text += f"      Winner: {winner}\n"
+                else:
+                    bracket_text += f"   ⏳ {match.team1['name']} vs {match.team2['name']}\n"
+            
+            bracket_text += "\n"
+    else:
+        bracket_text += f"Participants: {len(tournament.participants)}\n"
+        bracket_text += f"Matches: {len(tournament.matches)}\n"
+        bracket_text += f"Current Round: {tournament.current_round}\n"
+    
+    return bracket_text
+
+# ADD THESE DISPLAY FUNCTIONS:
+def handle_tournament_menu(chat_id: int, user_id: int):
+    """Show tournament main menu"""
+    menu_text = (
+        "🏆 TOURNAMENT HUB 🏆\n\n"
+        "Choose an option:\n"
+        "🎯 Join Tournament\n"
+        "➕ Create Tournament\n"
+        "📊 View Tournaments\n"
+        "🥇 Rankings\n"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🎯 Join", callback_data="tournament_join"),
+        types.InlineKeyboardButton("➕ Create", callback_data="tournament_create")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📊 View", callback_data="tournament_list"),
+        types.InlineKeyboardButton("🥇 Rankings", callback_data="tournament_rankings")
+    )
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+    
+    bot.send_message(chat_id, menu_text, reply_markup=kb)
+
+
+def show_all_tournaments(chat_id: int):
+    """List all active tournaments"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             
             if is_postgres:
-                cur.execute("""
-                    SELECT t.*, COUNT(tp.user_id) as participants
-                    FROM tournaments t
-                    LEFT JOIN tournament_participants tp ON t.id = tp.tournament_id
-                    WHERE t.status IN (%s, %s)
-                    GROUP BY t.id
-                    ORDER BY t.created_at DESC
-                    LIMIT 10
-                """, (TournamentStatus.REGISTRATION.value, TournamentStatus.UPCOMING.value))
+                cur.execute("SELECT id, name, type, status FROM tournaments WHERE status IN ('registration', 'live') LIMIT 10")
             else:
-                cur.execute("""
-                    SELECT t.*, COUNT(tp.user_id) as participants
-                    FROM tournaments t
-                    LEFT JOIN tournament_participants tp ON t.id = tp.tournament_id
-                    WHERE t.status IN (?, ?)
-                    GROUP BY t.id
-                    ORDER BY t.created_at DESC
-                    LIMIT 10
-                """, (TournamentStatus.REGISTRATION.value, TournamentStatus.UPCOMING.value))
+                cur.execute("SELECT id, name, type, status FROM tournaments WHERE status IN ('registration', 'live') LIMIT 10")
             
             tournaments = cur.fetchall()
         
         if not tournaments:
-            bot.send_message(
-                chat_id, 
-                "🏆 No tournaments available right now.\n\nCheck back later or create your own!",
-                reply_markup=kb_tournament_menu()
-            )
+            bot.send_message(chat_id, "No tournaments available right now.")
             return
         
-        tournament_text = "🏆 <b>Available Tournaments</b>\n\n"
+        text = "📊 AVAILABLE TOURNAMENTS\n\n"
         kb = types.InlineKeyboardMarkup(row_width=1)
         
         for tournament in tournaments:
-            status_emoji = "🟢" if tournament["status"] == "registration" else "🟡"
-            tournament_text += (
-                f"{status_emoji} <b>{tournament['name']}</b>\n"
-                f"   📋 {tournament['format']} • 💰 {tournament['entry_fee']} coins\n"
-                f"   👥 {tournament['participants']}/{tournament['max_players']} players\n"
-                f"   🏆 Prize: {tournament['prize_pool']} coins\n\n"
-            )
-            
-            if tournament["status"] == "registration":
-                kb.add(types.InlineKeyboardButton(
-                    f"🎯 Join {tournament['name']}",
-                    callback_data=f"join_tournament_{tournament['id']}"
-                ))
+            text += f"🏆 {tournament['name']} ({tournament['type'].upper()})\n"
+            kb.add(types.InlineKeyboardButton(
+                f"View {tournament['name']}", 
+                callback_data=f"tourn_view_{tournament['id']}"
+            ))
         
-        kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournaments"))
-        bot.send_message(chat_id, tournament_text, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu"))
+        bot.send_message(chat_id, text, reply_markup=kb)
         
     except Exception as e:
-        logger.error(f"Error showing available tournaments: {e}")
-        bot.send_message(chat_id, "❌ Error loading tournaments.")
+        logger.error(f"Error showing tournaments: {e}")
+        bot.send_message(chat_id, "Error loading tournaments.")
+
+
+def show_tournament_participants(chat_id: int, tournament_id: str):
+    """Display tournament participants"""
+    try:
+        tournament = load_tournament_from_db(tournament_id)
+        if not tournament:
+            bot.send_message(chat_id, "❌ Tournament not found.")
+            return
+        
+        text = (
+            f"👥 PARTICIPANTS - {tournament.name}\n\n"
+            f"Total: {len(tournament.participants)}/16\n\n"
+        )
+        
+        for idx, participant in enumerate(tournament.participants, 1):
+            text += f"{idx}. {participant['avatar']} {participant['username']}\n"
+        
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            types.InlineKeyboardButton("🎯 Join Tournament", callback_data=f"join_tourn_{tournament_id}"),
+            types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu")
+        )
+        
+        bot.send_message(chat_id, text, reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error showing participants: {e}")
+        bot.send_message(chat_id, "❌ Error loading tournament.")
+
+
+def start_tournament_match(chat_id: int, user_id: int, tournament_id: str, match_id: str):
+    """Start a specific tournament match"""
+    try:
+        tournament = load_tournament_from_db(tournament_id)
+        if not tournament:
+            bot.send_message(chat_id, "❌ Tournament not found.")
+            return
+        
+        match = next((m for m in tournament.matches if m.match_id == match_id), None)
+        if not match:
+            bot.send_message(chat_id, "❌ Match not found.")
+            return
+        
+        # Store match context in session
+        set_user_session_data(user_id, "current_tournament", tournament_id)
+        set_user_session_data(user_id, "current_match", match_id)
+        
+        # Start toss
+        toss_text = (
+            f"🏆 {match.tournament_stage}\n\n"
+            f"{match.team1['emoji']} {match.team1['name']} vs {match.team2['emoji']} {match.team2['name']}\n\n"
+            f"🪙 TOSS TIME!\n\n"
+            f"Predict the toss:"
+        )
+        
+        kb = types.InlineKeyboardMarkup()
+        kb.add(
+            types.InlineKeyboardButton("🪙 Heads", callback_data=f"tourn_toss_heads_{tournament_id}_{match_id}"),
+            types.InlineKeyboardButton("🪙 Tails", callback_data=f"tourn_toss_tails_{tournament_id}_{match_id}")
+        )
+        
+        bot.send_message(chat_id, toss_text, reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error starting tournament match: {e}")
+        bot.send_message(chat_id, "❌ Error starting match.")
+
+
 
 def show_challenges_menu(chat_id: int, user_id: int):
     try:
@@ -3123,7 +3735,7 @@ def kb_main_menu() -> types.InlineKeyboardMarkup:
         types.InlineKeyboardButton("⚙️ Custom Match", callback_data="custom_match")
     )
     kb.add(
-        types.InlineKeyboardButton("🏆 Tournaments", callback_data="tournaments"),
+        types.InlineKeyboardButton("🏆 Tournaments", callback_data="tournament_menu"),
         types.InlineKeyboardButton("🎯 Challenges", callback_data="challenges")
     )
     kb.add(
@@ -3232,7 +3844,7 @@ def _update_tournament_in_db(tournament):
                         prize_pool = %s, brackets = %s, updated_at = %s
                     WHERE id = %s
                 """, (
-                    tournament.name, tournament.status.value, tournament.current_round,
+                    tournament.name, tournament.tournament_state.value, tournament.current_round,
                     tournament.prize_pool, json.dumps(tournament.brackets), now, tournament.id
                 ))
             else:
@@ -3242,7 +3854,7 @@ def _update_tournament_in_db(tournament):
                         prize_pool = ?, brackets = ?, updated_at = ?
                     WHERE id = ?
                 """, (
-                    tournament.name, tournament.status.value, tournament.current_round,
+                    tournament.name, tournament.tournament_state.value, tournament.current_round,
                     tournament.prize_pool, json.dumps(tournament.brackets), now, tournament.id
                 ))
                 
@@ -3268,8 +3880,8 @@ def _send_registration_confirmation(chat_id: int, user_id: int, tournament):
 def _start_tournament(tournament_id: int):
     """Start tournament when full"""
     try:
-        tournament = tournament_manager._get_tournament(tournament_id)
-        if tournament and len(tournament.participants) >= tournament.max_players:
+        tournament = load_tournament_from_db(tournament_id)
+        if tournament and len(tournament.participants) >= 16:
             tournament.status = TournamentStatus.ONGOING
             logger.info(f"Tournament {tournament_id} started with {len(tournament.participants)} players")
             # Additional tournament start logic here
@@ -3808,7 +4420,7 @@ def handle_callback(call):
         # Tournament handlers (simplified)
         elif data == "tournaments":
             bot.answer_callback_query(call.id, "Loading tournaments...")
-            show_tournament_menu(chat_id)
+            handle_tournament_menu(chat_id)
             
         elif data == "challenges":
             bot.answer_callback_query(call.id, "Loading challenges...")
@@ -3819,6 +4431,78 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "Main menu")
             welcome_text = f"🏏 Welcome back! What would you like to do?"
             bot.send_message(chat_id, welcome_text, reply_markup=kb_main_menu())
+        
+        elif data == "tournament_menu":
+            handle_tournament_menu(chat_id, user_id)
+
+        elif data == "tournament_create":
+            handle_create_tournament(chat_id, user_id)
+
+        elif data.startswith("fmt_"):
+            format_key = data
+            handle_tournament_type_selection(chat_id, user_id, format_key)
+
+        elif data.startswith("type_"):
+            tournament_type = data.split("_")[1]
+            handle_tournament_theme_selection(chat_id, user_id, tournament_type)
+
+        elif data.startswith("theme_"):
+            theme = data.split("_")[1]
+            finalize_tournament_creation(chat_id, user_id, theme)
+
+        elif data.startswith("tourn_view_"):
+            tournament_id = data.split("_")[2]
+            show_tournament_participants(chat_id, tournament_id)
+
+        elif data.startswith("join_tourn_"):
+            tournament_id = data.split("_")[2]
+            user_id = call.from_user.id
+            username = call.from_user.first_name or call.from_user.username
+            
+            try:
+                tournament = load_tournament_from_db(tournament_id)
+                
+                if not tournament:
+                    bot.answer_callback_query(call.id, "Tournament not found", show_alert=True)
+                    return
+                
+                # Check if tournament is full
+                if len(tournament.participants) >= 16:
+                    bot.answer_callback_query(call.id, "Tournament is full", show_alert=True)
+                    return
+                
+                # Check if already joined
+                if any(p['user_id'] == user_id for p in tournament.participants):
+                    bot.answer_callback_query(call.id, "Already registered", show_alert=True)
+                    return
+                
+                # Add participant
+                result = tournament.add_participant(user_id, username)
+                
+                if result['success']:
+                    # Save updated tournament
+                    save_tournament_to_db(tournament, call.message.chat.id)
+                    
+                    success_msg = (
+                        f"✅ {result['message']}\n\n"
+                        f"Participants: {result['participants']}\n\n"
+                        f"Waiting for tournament to start..."
+                    )
+                    
+                    kb = types.InlineKeyboardMarkup(row_width=1)
+                    kb.add(
+                        types.InlineKeyboardButton("👥 View Participants", callback_data=f"tourn_view_{tournament_id}"),
+                        types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu")
+                    )
+                    
+                    bot.send_message(call.message.chat.id, success_msg, reply_markup=kb)
+                    bot.answer_callback_query(call.id, "Joined successfully!", show_alert=False)
+                else:
+                    bot.answer_callback_query(call.id, f"Join failed: {result['message']}", show_alert=True)
+            
+            except Exception as e:
+                logger.error(f"Error joining tournament: {e}")
+                bot.answer_callback_query(call.id, "Error joining tournament", show_alert=True)
             
         else:
             # Log unhandled callbacks for debugging
@@ -3876,131 +4560,125 @@ def send_cricket_animation(chat_id: int, event_type: str, caption: str = ""):
     return AnimationManager.send_animation(chat_id, event_type, caption)
 
 
-def start_tournament_creation(chat_id: int, user_id: int):
-    """Start tournament creation process"""
+def handle_create_tournament(chat_id: int, user_id: int):
+    """Start tournament creation"""
+    set_user_session_data(user_id, "creating_tournament", True)
+    set_user_session_data(user_id, "tournament_step", "format")
+    
+    text = (
+        "⚙️ CREATE TOURNAMENT\n\n"
+        "Step 1: Choose Format\n\n"
+        "Select match format:"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    formats = [
+        ("🏃 T10 (10 overs)", "fmt_10"),
+        ("🏏 T20 (20 overs)", "fmt_20"),
+        ("⚡ T5 (5 overs)", "fmt_5"),
+    ]
+    
+    for text_btn, cb in formats:
+        kb.add(types.InlineKeyboardButton(text_btn, callback_data=cb))
+    
+    kb.add(types.InlineKeyboardButton("🔙 Cancel", callback_data="tournament_menu"))
+    
+    bot.send_message(chat_id, text, reply_markup=kb)
+
+
+def handle_tournament_type_selection(chat_id: int, user_id: int, format_key: str):
+    """Ask for tournament type after format"""
+    set_user_session_data(user_id, "tournament_format", format_key)
+    set_user_session_data(user_id, "tournament_step", "type")
+    
+    text = (
+        "⚙️ CREATE TOURNAMENT\n\n"
+        "Step 2: Choose Type\n\n"
+        "Select tournament type:"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("🏆 Knockout", callback_data="type_knockout"),
+        types.InlineKeyboardButton("📊 League", callback_data="type_league")
+    )
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_create"))
+    
+    bot.send_message(chat_id, text, reply_markup=kb)
+
+
+def finalize_tournament_creation(chat_id: int, user_id: int, theme: str):
+    """Create and save tournament"""
     try:
-        set_user_session_data(user_id, "creating_tournament", True)
-        set_user_session_data(user_id, "tournament_step", "format")
+        format_key = get_user_session_data(user_id, "tournament_format")
+        tournament_type = get_user_session_data(user_id, "tournament_type")
         
-        creation_text = (
-            f"➕ <b>Create Tournament</b>\n\n"
-            f"Let's create your tournament step by step!\n\n"
-            f"<b>Step 1: Choose Format</b>\n"
-            f"Select the match format for your tournament:"
+        format_map = {"fmt_5": 5, "fmt_10": 10, "fmt_20": 20}
+        overs = format_map.get(format_key, 10)
+        
+        tournament_id = str(int(time.time() * 1000))
+        tournament = EliteTournament(
+            tournament_id,
+            f"{theme.upper()} Tournament",
+            tournament_type,
+            theme,
+            overs,
+            10,
+            user_id
         )
         
-        bot.send_message(chat_id, creation_text, reply_markup=kb_tournament_formats())
+        save_tournament_to_db(tournament, chat_id)
         
-    except Exception as e:
-        logger.error(f"Error starting tournament creation: {e}")
-        bot.send_message(chat_id, "❌ Error starting tournament creation.")
-
-
-def handle_tournament_format_selection(chat_id: int, user_id: int, format_key: str):
-    """Handle tournament format selection"""
-    try:
-        if format_key not in TOURNAMENT_FORMATS:
-            bot.send_message(chat_id, "❌ Invalid format selection.")
-            return
-        
-        format_data = TOURNAMENT_FORMATS[format_key]
-        set_user_session_data(user_id, "tournament_format", format_key)
-        set_user_session_data(user_id, "tournament_step", "theme")
-        
-        theme_text = (
-            f"➕ <b>Create Tournament</b>\n\n"
-            f"✅ Format: {format_data['name']}\n"
-            f"💰 Entry Fee: {format_data['entry_fee']} coins\n\n"
-            f"<b>Step 2: Choose Theme</b>\n"
-            f"Select a theme for your tournament:"
-        )
-        
-        bot.send_message(chat_id, theme_text, reply_markup=kb_tournament_themes())
-        
-    except Exception as e:
-        logger.error(f"Error handling format selection: {e}")
-
-def handle_tournament_theme_selection(chat_id: int, user_id: int, theme_key: str):
-    """Handle tournament theme selection and finalize creation"""
-    try:
-        theme_map = {
-            "world_cup": TournamentTheme.WORLD_CUP,
-            "ipl": TournamentTheme.IPL,
-            "ashes": TournamentTheme.ASHES,
-            "champions": TournamentTheme.CHAMPIONS,
-            "custom": TournamentTheme.CUSTOM
-        }
-        
-        theme = theme_map.get(theme_key)
-        if not theme:
-            bot.send_message(chat_id, "Invalid theme selection.")
-            return
-        
-        format_key = get_user_session_data(user_id, "tournament_format", None)
-        if not format_key:
-            bot.send_message(chat_id, "Session expired. Please start over.")
-            return
-        
-        format_data = TOURNAMENT_FORMATS[format_key]
-        
-        # Create tournament
-        tournament_data = {
-            "name": f"Custom {format_data['name']} Tournament",
-            "type": "knockout",
-            "theme": theme_key,
-            "format": format_data['name'].split()[-1],  # Extract format (T5, T10, etc.)
-            "entry_fee": format_data['entry_fee'],
-            "max_players": 8
-        }
-        
-        tournament = tournament_manager.create_tournament(user_id, **tournament_data)
-        
-        # Clear session data
+        # Clear session
         set_user_session_data(user_id, "creating_tournament", None)
         set_user_session_data(user_id, "tournament_format", None)
+        set_user_session_data(user_id, "tournament_type", None)
         set_user_session_data(user_id, "tournament_step", None)
         
         success_text = (
-            f"✅ <b>Tournament Created Successfully!</b>\n\n"
-            f"🏆 <b>{tournament.name}</b>\n"
-            f"🎨 Theme: {theme.value.replace('_', ' ').title()}\n"
-            f"📋 Format: {tournament.format}\n"
-            f"💰 Entry Fee: {tournament.entry_fee} coins\n"
-            f"🏆 Prize Pool: {tournament.prize_pool} coins\n"
-            f"👥 Max Players: {tournament.max_players}\n\n"
-            f"Tournament ID: <code>{tournament.id}</code>\n\n"
-            f"Share this ID with friends to let them join!"
+            f"✅ TOURNAMENT CREATED!\n\n"
+            f"🏆 {tournament.name}\n"
+            f"📋 Type: {tournament_type.upper()}\n"
+            f"📊 Format: T{overs}\n"
+            f"🎨 Theme: {theme.upper()}\n\n"
+            f"Tournament ID: {tournament_id}\n\n"
+            f"Share with friends to invite them!"
         )
         
-        bot.send_message(chat_id, success_text, reply_markup=kb_tournament_menu())
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            types.InlineKeyboardButton("👥 View Participants", callback_data=f"tourn_view_{tournament_id}"),
+            types.InlineKeyboardButton("🎮 Start Tournament", callback_data=f"tourn_start_{tournament_id}"),
+            types.InlineKeyboardButton("🏆 Tournaments", callback_data="tournament_menu")
+        )
+        
+        bot.send_message(chat_id, success_text, reply_markup=kb)
         
     except Exception as e:
-        logger.error(f"Error handling theme selection: {e}")
-        bot.send_message(chat_id, "Error creating tournament. Please try again.")
+        logger.error(f"Error creating tournament: {e}")
+        bot.send_message(chat_id, "❌ Error creating tournament. Please try again.")
 
-def handle_tournament_registration(chat_id: int, user_id: int, tournament_id: int):
-    """Handle tournament registration"""
-    try:
-        result = tournament_manager.register_player(tournament_id, user_id, chat_id)
-        
-        if result["success"]:
-            success_text = (
-                f"🎉 <b>Registration Successful!</b>\n\n"
-                f"You've joined the tournament!\n"
-                f"{result['message']}\n\n"
-                f"Good luck! 🍀"
-            )
-            bot.send_message(chat_id, success_text, reply_markup=kb_tournament_menu())
-        else:
-            bot.send_message(
-                chat_id, 
-                f"❌ Registration failed: {result['message']}",
-                reply_markup=kb_tournament_menu()
-            )
-        
-    except Exception as e:
-        logger.error(f"Error handling tournament registration: {e}")
-        bot.send_message(chat_id, "❌ Error joining tournament.")
+
+def handle_tournament_theme_selection(chat_id: int, user_id: int, tournament_type: str):
+    """Ask for tournament theme"""
+    set_user_session_data(user_id, "tournament_type", tournament_type)
+    set_user_session_data(user_id, "tournament_step", "theme")
+    
+    text = (
+        "⚙️ CREATE TOURNAMENT\n\n"
+        "Step 3: Choose Theme\n\n"
+        "Select theme:"
+    )
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("🌍 World Cup", callback_data="theme_world_cup"),
+        types.InlineKeyboardButton("🇮🇳 IPL", callback_data="theme_ipl"),
+        types.InlineKeyboardButton("⚡ Champions", callback_data="theme_champions")
+    )
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_type"))
+    
+    bot.send_message(chat_id, text, reply_markup=kb)
 
 
 def check_webhook_status():

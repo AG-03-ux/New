@@ -154,7 +154,7 @@ if not TOKEN:
 
 # Initialize Bot directly
 try:
-    bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+    bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
     bot_info = bot.get_me()
     logger.info(f"Bot initialized: @{bot_info.username} (ID: {bot_info.id})")
 except Exception as e:
@@ -4419,10 +4419,26 @@ if __name__ == "__main__":
 
 # === FINAL INITIALIZATION (MUST BE AT END) ===
 # This runs when the module is loaded by gunicorn
+
+# Log handler registration
+logger.info(f"=== HANDLERS REGISTERED ===")
+logger.info(f"Message handlers: {len(bot.message_handlers)}")
+logger.info(f"Callback handlers: {len(bot.callback_query_handlers)}")
+
+# List all registered command handlers for debugging
+for handler in bot.message_handlers:
+    if hasattr(handler, 'commands') and handler.commands:
+        logger.info(f"  - Command handler: {handler.commands}")
+
 try:
     if USE_WEBHOOK and WEBHOOK_URL:
         logger.info("=== FINAL WEBHOOK SETUP ===")
+        
+        # Small delay to ensure everything is loaded
+        time.sleep(1)
+        
         setup_webhook()
         logger.info("=== BOT READY TO RECEIVE UPDATES ===")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}/webhook/{TOKEN[:10]}...")
 except Exception as e:
     logger.error(f"Final webhook setup failed: {e}")

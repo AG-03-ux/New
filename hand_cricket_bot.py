@@ -4322,7 +4322,7 @@ def verify_bot():
             'bot_id': me.id,
             'webhook_url': webhook_info.url,
             'webhook_set': bool(webhook_info.url),
-            'pending_updates': webhook_info.pending_updates_count,
+            'pending_updates': webhook_info.pending_update_count,  # ← Fixed: removed 's'
             'last_error': webhook_info.last_error_message or "None",
             'database': db_status,
             'handlers_registered': {

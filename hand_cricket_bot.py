@@ -154,7 +154,7 @@ if not TOKEN:
 
 # Initialize Bot directly
 try:
-    bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+    bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
     bot_info = bot.get_me()
     logger.info(f"Bot initialized: @{bot_info.username} (ID: {bot_info.id})")
 except Exception as e:
@@ -3483,42 +3483,69 @@ def show_achievements(chat_id: int, user_id: int):
 def ensure_user(message: types.Message):
     if message.from_user:
         try:
+            logger.info(f"Upserting user {message.from_user.id}")
             upsert_user(message.from_user)
+            logger.info(f"✓ User {message.from_user.id} upserted")
         except Exception as e:
-            logger.error(f"Failed to upsert user {message.from_user.id}: {e}")
-
+            logger.error(f"✗ Failed to upsert user {message.from_user.id}: {e}", exc_info=True)
 
 def setup_webhook():
+    """Set up webhook with proper URL format"""
     try:
         if USE_WEBHOOK and WEBHOOK_URL:
-            # Ensure proper webhook URL format
+            # Remove any existing webhook first
+            bot.remove_webhook()
+            time.sleep(1)
+            
+            # Construct proper webhook URL
             webhook_url = WEBHOOK_URL.rstrip('/')
-            if not webhook_url.endswith('/webhook/' + TOKEN):
-                webhook_url += '/webhook/' + TOKEN
+            if not webhook_url.endswith(f'/webhook/{TOKEN}'):
+                webhook_url = f"{webhook_url}/webhook/{TOKEN}"
             
             logger.info(f"Setting webhook to: {webhook_url}")
-            result = bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook set result: {result}")
             
-            # Verify webhook was set
-            info = bot.get_webhook_info()
-            logger.info(f"Webhook info: URL={info.url}, pending={info.pending_update_count}")
+            # Set webhook
+            result = bot.set_webhook(
+                url=webhook_url,
+                max_connections=40,
+                drop_pending_updates=True  # Clear any pending updates
+            )
             
-            if info.last_error_message:
-                logger.error(f"Webhook error: {info.last_error_message}")
-            
-            return True
+            if result:
+                logger.info("Webhook set successfully")
+                
+                # Verify
+                info = bot.get_webhook_info()
+                logger.info(f"Webhook verified: {info.url}")
+                logger.info(f"Pending updates: {info.pending_update_count}")
+                
+                if info.last_error_message:
+                    logger.error(f"Webhook error: {info.last_error_message}")
+                    return False
+                
+                return True
+            else:
+                logger.error("Failed to set webhook")
+                return False
+                
     except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
+        logger.error(f"Error setting webhook: {e}", exc_info=True)
         return False
+    
+    return False
 # Message handlers
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     try:
-        logger.info(f"Received /start from user {message.from_user.id}")
+        logger.info(f"=== /START HANDLER TRIGGERED ===")
+        logger.info(f"User: {message.from_user.id} - {message.from_user.first_name}")
         
         # CRITICAL: Ensure user is created first
-        ensure_user(message)
+        try:
+            ensure_user(message)
+            logger.info(f"User {message.from_user.id} ensured in database")
+        except Exception as e:
+            logger.error(f"Failed to ensure user: {e}", exc_info=True)
         
         welcome_text = (
             f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
@@ -3526,12 +3553,16 @@ def cmd_start(message):
             f"Ready to play some cricket?"
         )
         
+        logger.info(f"Sending welcome message to {message.chat.id}")
         bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-        logger.info(f"Sent welcome message to {message.from_user.id}")
+        logger.info(f"✓ Welcome message sent to {message.from_user.id}")
         
     except Exception as e:
-        logger.error(f"Error in /start handler: {e}", exc_info=True)
-        bot.reply_to(message, "Welcome! There was a minor issue, but you can still play. Try /play")
+        logger.error(f"✗ Error in /start handler: {e}", exc_info=True)
+        try:
+            bot.reply_to(message, "Welcome! There was a minor issue, but you can still play. Try /play")
+        except:
+            pass
 
 
 @bot.message_handler(commands=['play'])
@@ -4138,6 +4169,7 @@ def cmd_migrate(message: types.Message):
     except Exception as e:
         logger.error(f"Error running migrations: {e}")
         bot.send_message(message.chat.id, "❌ Migration failed. Check logs.")
+
 # Flask app for webhook mode
 app = Flask(__name__)
 
@@ -4213,41 +4245,36 @@ def get_webhook_info():
         return {'error': str(e)}
 
 @app.route('/webhook/' + TOKEN, methods=['POST'])
-def webhook_debug():
-    """Debug webhook handler"""
+def webhook():
+    """Handle incoming webhook updates"""
     try:
         if request.headers.get('content-type') == 'application/json':
             json_string = request.get_data().decode('utf-8')
-            logger.info(f"Received webhook data: {json_string[:200]}...")
+            logger.info(f"Received webhook update")
             
             update = telebot.types.Update.de_json(json_string)
             logger.info(f"Processing update ID: {update.update_id}")
             
-            # Log message details
+            # Log what type of update it is
             if update.message:
-                logger.info(f"Message text: '{update.message.text}' from user {update.message.from_user.id}")
-                logger.info(f"Chat ID: {update.message.chat.id}")
+                logger.info(f"Message from user {update.message.from_user.id}: {update.message.text}")
+            elif update.callback_query:
+                logger.info(f"Callback from user {update.callback_query.from_user.id}: {update.callback_query.data}")
             
-            # Process the update with error catching
+            # Process update - THIS IS THE KEY PART
             try:
                 bot.process_new_updates([update])
-                logger.info(f"Update {update.update_id} processed successfully")
+                logger.info(f"✓ Update {update.update_id} processed successfully")
             except Exception as e:
-                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
-                # Send a simple test response
-                try:
-                    if update.message:
-                        bot.send_message(update.message.chat.id, f"Debug: Received '{update.message.text}' but handler failed: {str(e)[:100]}")
-                except Exception as e2:
-                    logger.error(f"Even debug response failed: {e2}")
+                logger.error(f"✗ Error processing update: {e}", exc_info=True)
             
             return '', 200
         else:
             logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
-            return 'Invalid request', 400
+            return '', 403
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
-        return 'Error processing update', 500
+        return '', 500
 
 @app.route('/test-db', methods=['GET'])
 def test_database():
@@ -4291,7 +4318,41 @@ def test_token():
     except Exception as e:
         return {'bot': 'failed', 'error': str(e)}, 500
 
-
+@app.route('/verify-bot', methods=['GET'])
+def verify_bot():
+    """Verify bot is working"""
+    try:
+        # Test bot
+        me = bot.get_me()
+        
+        # Test webhook
+        webhook_info = bot.get_webhook_info()
+        
+        # Test database
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                db_status = "OK"
+        except Exception as e:
+            db_status = f"ERROR: {e}"
+        
+        return jsonify({
+            'bot_username': f"@{me.username}",
+            'bot_id': me.id,
+            'webhook_url': webhook_info.url,
+            'webhook_set': bool(webhook_info.url),
+            'pending_updates': webhook_info.pending_update_count,  # ← Fixed: removed 's'
+            'last_error': webhook_info.last_error_message or "None",
+            'database': db_status,
+            'handlers_registered': {
+                'message': len(bot.message_handlers),
+                'callback': len(bot.callback_query_handlers)
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/test', methods=['GET'])
 def test_bot():
@@ -4320,61 +4381,64 @@ def test_bot():
         'webhook_url': WEBHOOK_URL if USE_WEBHOOK else 'polling'
     }, 200
 
-# Initialize for gunicorn and direct execution
-try:
-    logger.info("=== STARTING DATABASE INITIALIZATION ===")
-    db_init()
-    logger.info("=== DATABASE INITIALIZED SUCCESSFULLY ===")
-    
-    # Set webhook for production
-    if WEBHOOK_URL and USE_WEBHOOK:
-        logger.info("=== SETTING WEBHOOK ===")
-    if setup_webhook():
-        logger.info("=== WEBHOOK SETUP: SUCCESS ===")
-    else:
-        logger.error("=== WEBHOOK SETUP: FAILED ===")
-        
-except Exception as e:
-    logger.error(f"=== CRITICAL INITIALIZATION ERROR ===", exc_info=True)
 
 import time
 start_time = time.time()
 
 
 if __name__ == "__main__":
+    logger.info("=" * 50)
+    logger.info("CRICKET BOT STARTING (WEBHOOK MODE)")
+    logger.info("=" * 50)
+
+    # 1. Validate environment
+    validate_environment()
+    
+    # 2. Initialize database
     try:
-        logger.info("=" * 50)
-        logger.info("CRICKET BOT STARTING")
-        logger.info("=" * 50)
-        
-        # Validate environment
-        validate_environment()
-        
-        # Initialize database with better error handling
-        try:
-            logger.info("Initializing database...")
-            db_init()
-            logger.info("Database initialized")
-        except Exception as e:
-            logger.error(f"Database init failed: {e}")
-            logger.info("Continuing without full database features...")
-        
-        # Always use polling for reliability
-        # logger.info("Starting in POLLING mode (most reliable)")
-        
-        # Clear any existing webhook
-        try:
-            bot.remove_webhook()
-            logger.info("Webhook cleared")
-        except:
-            pass
-        
-        # Start polling
-        # logger.info("Starting bot polling...")
-        # bot.infinity_polling(timeout=10, long_polling_timeout=5, none_stop=True)
-            
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Initializing database...")
+        db_init()
+        logger.info("✓ Database initialized")
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        raise
+        logger.error(f"✗ Database init failed: {e}")
+        sys.exit(1)
+    
+    # 3. Setup webhook
+    if USE_WEBHOOK:
+        logger.info("Setting up webhook...")
+        if setup_webhook():
+            logger.info("✓ Webhook configured successfully")
+        else:
+            logger.error("✗ Webhook setup failed")
+            sys.exit(1)
+    
+    # 4. Start Flask app (gunicorn will handle this on Render)
+    logger.info("Bot is ready to receive updates")
+    logger.info(f"Visit your-app.onrender.com/verify-bot to check status")
+
+
+# === FINAL INITIALIZATION (MUST BE AT END) ===
+# This runs when the module is loaded by gunicorn
+
+# Log handler registration
+logger.info(f"=== HANDLERS REGISTERED ===")
+logger.info(f"Message handlers: {len(bot.message_handlers)}")
+logger.info(f"Callback handlers: {len(bot.callback_query_handlers)}")
+
+# List all registered command handlers for debugging
+for handler in bot.message_handlers:
+    if hasattr(handler, 'commands') and handler.commands:
+        logger.info(f"  - Command handler: {handler.commands}")
+
+try:
+    if USE_WEBHOOK and WEBHOOK_URL:
+        logger.info("=== FINAL WEBHOOK SETUP ===")
+        
+        # Small delay to ensure everything is loaded
+        time.sleep(1)
+        
+        setup_webhook()
+        logger.info("=== BOT READY TO RECEIVE UPDATES ===")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}/webhook/{TOKEN[:10]}...")
+except Exception as e:
+    logger.error(f"Final webhook setup failed: {e}")

@@ -4360,7 +4360,7 @@ if __name__ == "__main__":
             logger.info("Continuing without full database features...")
         
         # Always use polling for reliability
-        logger.info("Starting in POLLING mode (most reliable)")
+        # logger.info("Starting in POLLING mode (most reliable)")
         
         # Clear any existing webhook
         try:
@@ -4370,8 +4370,8 @@ if __name__ == "__main__":
             pass
         
         # Start polling
-        logger.info("Starting bot polling...")
-        bot.infinity_polling(timeout=10, long_polling_timeout=5, none_stop=True)
+        # logger.info("Starting bot polling...")
+        # bot.infinity_polling(timeout=10, long_polling_timeout=5, none_stop=True)
             
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")

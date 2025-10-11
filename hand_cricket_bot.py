@@ -4159,6 +4159,12 @@ def cmd_migrate(message: types.Message):
     except Exception as e:
         logger.error(f"Error running migrations: {e}")
         bot.send_message(message.chat.id, "❌ Migration failed. Check logs.")
+
+
+@bot.message_handler(func=lambda message: True)
+def catch_all(message):
+    logger.info(f"CATCH-ALL: Received message: {message.text} from {message.from_user.id}")
+    bot.reply_to(message, f"I received: {message.text}")
 # Flask app for webhook mode
 app = Flask(__name__)
 
@@ -4234,8 +4240,7 @@ def get_webhook_info():
         return {'error': str(e)}
 
 @app.route('/webhook/' + TOKEN, methods=['POST'])
-@app.route('/webhook/' + TOKEN, methods=['POST'])
-def webhook():  # ← Changed from webhook_debug to webhook
+def webhook():
     """Handle incoming webhook updates"""
     try:
         if request.headers.get('content-type') == 'application/json':
@@ -4245,8 +4250,18 @@ def webhook():  # ← Changed from webhook_debug to webhook
             update = telebot.types.Update.de_json(json_string)
             logger.info(f"Processing update ID: {update.update_id}")
             
-            # Process update
-            bot.process_new_updates([update])
+            # Log what type of update it is
+            if update.message:
+                logger.info(f"Message from user {update.message.from_user.id}: {update.message.text}")
+            elif update.callback_query:
+                logger.info(f"Callback from user {update.callback_query.from_user.id}: {update.callback_query.data}")
+            
+            # Process update - THIS IS THE KEY PART
+            try:
+                bot.process_new_updates([update])
+                logger.info(f"✓ Update {update.update_id} processed successfully")
+            except Exception as e:
+                logger.error(f"✗ Error processing update: {e}", exc_info=True)
             
             return '', 200
         else:

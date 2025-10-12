@@ -100,39 +100,6 @@ except (ValueError, AttributeError):
 # Logging setup
 import logging.config
 
-LOGGING_CONFIG = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'detailed': {
-            'format': '[%(levelname)s] %(asctime)s %(name)s:%(lineno)d - %(message)s'
-        },
-    },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'level': 'INFO',
-            'formatter': 'detailed',
-            'stream': 'ext://sys.stdout'
-        },
-        'file': {
-            'class': 'logging.FileHandler',
-            'level': 'DEBUG',
-            'formatter': 'detailed',
-            'filename': 'cricket_bot.log',
-            'mode': 'a',
-        },
-    },
-    'loggers': {
-        'cricket-bot': {
-            'level': 'DEBUG',
-            'handlers': ['console', 'file'],
-            'propagate': False
-        }
-    }
-}
-
-logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger('cricket-bot')
 logging.basicConfig(
     level=logging.INFO,
@@ -704,6 +671,7 @@ def db_init():
         
         # Create schema version table and run migrations
         create_schema_version_table()
+        create_additional_tables()
         migrate_database()
         
         logger.info("=== MIGRATIONS COMPLETED ===")
@@ -712,6 +680,319 @@ def db_init():
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
+
+
+class PowerUpType(Enum):
+    BATTING_BOOST = "batting_boost"
+    BOWLING_BOOST = "bowling_boost"
+    LUCKY_CHARM = "lucky_charm"
+    DOUBLE_COINS = "double_coins"
+    XP_BOOST = "xp_boost"
+    WICKET_GUARD = "wicket_guard"
+
+
+class PowerUp:
+    POWERUPS = {
+        'batting_boost': {
+            'name': '⚡ Batting Boost',
+            'description': 'Increases boundary probability by 30%',
+            'duration': 3,  # overs
+            'cost': 50,
+            'effect': {'type': 'boundary_chance', 'value': 0.3}
+        },
+        'bowling_boost': {
+            'name': '🎯 Bowling Boost',
+            'description': 'Increases wicket probability by 25%',
+            'duration': 3,
+            'cost': 50,
+            'effect': {'type': 'wicket_chance', 'value': 0.25}
+        },
+        'lucky_charm': {
+            'name': '🍀 Lucky Charm',
+            'description': 'Reduces chance of getting out by 40%',
+            'duration': 2,
+            'cost': 75,
+            'effect': {'type': 'wicket_protection', 'value': 0.4}
+        },
+        'double_coins': {
+            'name': '💰 Double Coins',
+            'description': 'Earn 2x coins from this match',
+            'duration': 1,  # full match
+            'cost': 100,
+            'effect': {'type': 'coin_multiplier', 'value': 2.0}
+        },
+        'xp_boost': {
+            'name': '📈 XP Boost',
+            'description': 'Earn 1.5x XP from this match',
+            'duration': 1,
+            'cost': 80,
+            'effect': {'type': 'xp_multiplier', 'value': 1.5}
+        },
+        'wicket_guard': {
+            'name': '🛡️ Wicket Guard',
+            'description': 'Save one wicket automatically',
+            'duration': 1,
+            'cost': 120,
+            'effect': {'type': 'save_wicket', 'value': 1}
+        }
+    }
+    
+    @staticmethod
+    def apply_powerup(game: 'GameState', powerup_id: str) -> bool:
+        """Apply power-up to current game"""
+        if powerup_id not in PowerUp.POWERUPS:
+            return False
+        
+        powerup = PowerUp.POWERUPS[powerup_id]
+        
+        # Store active power-ups in game data
+        active_powerups = game.data.get('active_powerups', {})
+        active_powerups[powerup_id] = {
+            'duration_remaining': powerup['duration'],
+            'effect': powerup['effect']
+        }
+        game.data['active_powerups'] = active_powerups
+        game.save()
+        
+        return True
+    
+    @staticmethod
+    def check_powerup_effects(game: 'GameState', event_type: str) -> dict:
+        """Check if any active power-ups affect current event"""
+        active_powerups = game.data.get('active_powerups', {})
+        effects = {}
+        
+        for powerup_id, powerup_data in active_powerups.items():
+            effect = powerup_data.get('effect', {})
+            effect_type = effect.get('type')
+            
+            if event_type == 'batting' and effect_type == 'boundary_chance':
+                effects['boundary_bonus'] = effect.get('value', 0)
+            elif event_type == 'bowling' and effect_type == 'wicket_chance':
+                effects['wicket_bonus'] = effect.get('value', 0)
+            elif event_type == 'wicket' and effect_type == 'wicket_protection':
+                effects['wicket_save_chance'] = effect.get('value', 0)
+            elif event_type == 'wicket' and effect_type == 'save_wicket':
+                if powerup_data.get('duration_remaining', 0) > 0:
+                    effects['auto_save_wicket'] = True
+                    powerup_data['duration_remaining'] = 0  # Use up the power-up
+        
+        return effects
+    
+    @staticmethod
+    def update_powerup_durations(game: 'GameState'):
+        """Decrease power-up durations after each over"""
+        active_powerups = game.data.get('active_powerups', {})
+        expired = []
+        
+        for powerup_id, powerup_data in active_powerups.items():
+            powerup_data['duration_remaining'] -= 1
+            if powerup_data['duration_remaining'] <= 0:
+                expired.append(powerup_id)
+        
+        for powerup_id in expired:
+            del active_powerups[powerup_id]
+        
+        game.data['active_powerups'] = active_powerups
+        game.save()
+
+
+def kb_powerups_shop() -> types.InlineKeyboardMarkup:
+    """Power-ups shop keyboard"""
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    
+    for powerup_id, powerup in PowerUp.POWERUPS.items():
+        text = f"{powerup['name']} - {powerup['cost']} coins"
+        kb.add(types.InlineKeyboardButton(text, callback_data=f"buy_powerup_{powerup_id}"))
+    
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+    return kb
+
+
+def handle_powerup_purchase(user_id: int, powerup_id: str) -> dict:
+    """Handle power-up purchase"""
+    if powerup_id not in PowerUp.POWERUPS:
+        return {'success': False, 'message': 'Invalid power-up'}
+    
+    powerup = PowerUp.POWERUPS[powerup_id]
+    cost = powerup['cost']
+    
+    user_coins = _get_user_coins(user_id)
+    
+    if user_coins < cost:
+        return {'success': False, 'message': f'Not enough coins! Need {cost}, have {user_coins}'}
+    
+    # Deduct coins
+    _deduct_user_coins(user_id, cost)
+    
+    # Add to inventory
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            now = datetime.now(timezone.utc).isoformat()
+            
+            if is_postgres:
+                cur.execute("""
+                    INSERT INTO user_inventory (user_id, item_type, item_id, quantity, acquired_at)
+                    VALUES (%s, 'powerup', %s, 1, %s)
+                    ON CONFLICT (user_id, item_type, item_id)
+                    DO UPDATE SET quantity = user_inventory.quantity + 1
+                """, (user_id, powerup_id, now))
+            else:
+                # Check if exists
+                cur.execute("""
+                    SELECT quantity FROM user_inventory 
+                    WHERE user_id = ? AND item_type = 'powerup' AND item_id = ?
+                """, (user_id, powerup_id))
+                
+                row = cur.fetchone()
+                if row:
+                    cur.execute("""
+                        UPDATE user_inventory SET quantity = quantity + 1
+                        WHERE user_id = ? AND item_type = 'powerup' AND item_id = ?
+                    """, (user_id, powerup_id))
+                else:
+                    cur.execute("""
+                        INSERT INTO user_inventory (user_id, item_type, item_id, quantity, acquired_at)
+                        VALUES (?, 'powerup', ?, 1, ?)
+                    """, (user_id, powerup_id, now))
+        
+        return {
+            'success': True,
+            'message': f"✅ Purchased {powerup['name']}!\n{powerup['description']}"
+        }
+    except Exception as e:
+        logger.error(f"Error purchasing power-up: {e}")
+        return {'success': False, 'message': 'Purchase failed'}
+    
+
+class LeaderboardCategory(Enum):
+    HIGHEST_SCORE = "highest_score"
+    MOST_WINS = "most_wins"
+    WIN_STREAK = "win_streak"
+    MOST_SIXES = "most_sixes"
+    BEST_STRIKE_RATE = "best_strike_rate"
+    TOURNAMENT_WINS = "tournament_wins"
+    TOTAL_XP = "total_xp"
+
+
+def update_leaderboard(user_id: int, category: str, value: int):
+    """Update user's leaderboard position"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            now = datetime.now(timezone.utc).isoformat()
+            
+            if is_postgres:
+                cur.execute("""
+                    INSERT INTO leaderboards (category, user_id, value, updated_at)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (category, user_id)
+                    DO UPDATE SET value = GREATEST(leaderboards.value, EXCLUDED.value),
+                                  updated_at = EXCLUDED.updated_at
+                """, (category, user_id, value, now))
+            else:
+                cur.execute("""
+                    SELECT value FROM leaderboards WHERE category = ? AND user_id = ?
+                """, (category, user_id))
+                
+                row = cur.fetchone()
+                current_value = row['value'] if row else 0
+                
+                if value > current_value:
+                    if row:
+                        cur.execute("""
+                            UPDATE leaderboards SET value = ?, updated_at = ?
+                            WHERE category = ? AND user_id = ?
+                        """, (value, now, category, user_id))
+                    else:
+                        cur.execute("""
+                            INSERT INTO leaderboards (category, user_id, value, updated_at)
+                            VALUES (?, ?, ?, ?)
+                        """, (category, user_id, value, now))
+    except Exception as e:
+        logger.error(f"Error updating leaderboard: {e}")
+
+
+def get_leaderboard(category: str, limit: int = 10) -> list:
+    """Get top players for a category"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"""
+                SELECT l.user_id, l.value, u.username, u.first_name
+                FROM leaderboards l
+                JOIN users u ON l.user_id = u.user_id
+                WHERE l.category = {param_style}
+                ORDER BY l.value DESC
+                LIMIT {param_style}
+            """, (category, limit))
+            
+            return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting leaderboard: {e}")
+        return []
+
+
+def generate_leaderboard_display(category: str, top_players: list) -> str:
+    """Create leaderboard display"""
+    category_names = {
+        'highest_score': '🏏 Highest Score',
+        'most_wins': '🏆 Most Wins',
+        'win_streak': '🔥 Longest Streak',
+        'most_sixes': '🚀 Most Sixes',
+        'best_strike_rate': '⚡ Best Strike Rate',
+        'tournament_wins': '👑 Tournament Wins',
+        'total_xp': '📈 Total XP'
+    }
+    
+    display = (
+        f"{'═'*50}\n"
+        f" {category_names.get(category, category.upper())}\n"
+        f"{'═'*50}\n\n"
+    )
+    
+    if not top_players:
+        return display + "No data available yet!"
+    
+    medals = ['🥇', '🥈', '🥉']
+    
+    for i, player in enumerate(top_players, 1):
+        medal = medals[i-1] if i <= 3 else f"{i}."
+        username = player.get('username') or player.get('first_name', 'Unknown')
+        value = player.get('value', 0)
+        
+        display += f"{medal} {username}: {value}\n"
+    
+    return display
+
+
+def kb_leaderboard_categories() -> types.InlineKeyboardMarkup:
+    """Leaderboard category selector"""
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    
+    categories = [
+        ("🏏 High Score", "lb_highest_score"),
+        ("🏆 Most Wins", "lb_most_wins"),
+        ("🔥 Win Streak", "lb_win_streak"),
+        ("🚀 Most Sixes", "lb_most_sixes"),
+        ("⚡ Strike Rate", "lb_best_strike_rate"),
+        ("👑 Tournaments", "lb_tournament_wins"),
+        ("📈 Total XP", "lb_total_xp")
+    ]
+    
+    for text, callback in categories:
+        kb.add(types.InlineKeyboardButton(text, callback_data=callback))
+    
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+    return kb
+
+
 
 def log_event(chat_id: int, event: str, meta: str = ""):
     """Log events safely"""
@@ -2117,6 +2398,311 @@ class UserLevelManager:
             logger.error(f"Error awarding coins: {e}")
 
 
+class AchievementSystem:
+    ACHIEVEMENTS = {
+        'first_win': {
+            'name': 'First Victory',
+            'description': 'Win your first match',
+            'reward_coins': 50,
+            'reward_xp': 100,
+            'icon': '🏆'
+        },
+        'century_club': {
+            'name': 'Century Maker',
+            'description': 'Score 100+ runs in a match',
+            'reward_coins': 200,
+            'reward_xp': 300,
+            'icon': '💯'
+        },
+        'six_machine': {
+            'name': 'Six Machine',
+            'description': 'Hit 10 sixes in a match',
+            'reward_coins': 150,
+            'reward_xp': 250,
+            'icon': '🚀'
+        },
+        'win_streak_5': {
+            'name': 'Winning Streak',
+            'description': 'Win 5 matches in a row',
+            'reward_coins': 300,
+            'reward_xp': 400,
+            'icon': '🔥'
+        },
+        'tournament_champion': {
+            'name': 'Tournament Champion',
+            'description': 'Win a tournament',
+            'reward_coins': 500,
+            'reward_xp': 750,
+            'icon': '👑'
+        },
+        'perfect_chase': {
+            'name': 'Perfect Chase',
+            'description': 'Chase a target without losing a wicket',
+            'reward_coins': 250,
+            'reward_xp': 350,
+            'icon': '🎯'
+        },
+        'speed_demon': {
+            'name': 'Speed Demon',
+            'description': 'Score 50 runs in under 20 balls',
+            'reward_coins': 175,
+            'reward_xp': 275,
+            'icon': '⚡'
+        }
+    }
+    
+    @staticmethod
+    def check_achievements(user_id: int, match_data: dict) -> list:
+        """Check if user unlocked any achievements"""
+        unlocked = []
+        
+        # Check various achievements
+        if match_data.get('result') == 'win' and match_data.get('is_first_win'):
+            unlocked.append('first_win')
+        
+        if match_data.get('player_score', 0) >= 100:
+            unlocked.append('century_club')
+        
+        if match_data.get('player_sixes', 0) >= 10:
+            unlocked.append('six_machine')
+        
+        if match_data.get('winning_streak', 0) >= 5:
+            unlocked.append('win_streak_5')
+        
+        if match_data.get('is_tournament_win'):
+            unlocked.append('tournament_champion')
+        
+        if (match_data.get('result') == 'win' and 
+            match_data.get('innings') == 2 and 
+            match_data.get('player_wkts') == 0):
+            unlocked.append('perfect_chase')
+        
+        player_balls = match_data.get('player_balls_faced', 0)
+        player_score = match_data.get('player_score', 0)
+        if player_score >= 50 and player_balls < 20:
+            unlocked.append('speed_demon')
+        
+        # Save and reward
+        newly_unlocked = []
+        for achievement_id in unlocked:
+            if AchievementSystem._award_achievement(user_id, achievement_id):
+                newly_unlocked.append(achievement_id)
+        
+        return newly_unlocked
+    
+    @staticmethod
+    def _award_achievement(user_id: int, achievement_id: str) -> bool:
+        """Award achievement if not already unlocked"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                # Check if already unlocked
+                cur.execute(
+                    f"SELECT achievement_id FROM user_achievements WHERE user_id = {param_style} AND achievement_id = {param_style}",
+                    (user_id, achievement_id)
+                )
+                
+                if cur.fetchone():
+                    return False  # Already unlocked
+                
+                # Award achievement
+                achievement = AchievementSystem.ACHIEVEMENTS[achievement_id]
+                now = datetime.now(timezone.utc).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO user_achievements (user_id, achievement_id, unlocked_at)
+                        VALUES (%s, %s, %s)
+                    """, (user_id, achievement_id, now))
+                else:
+                    cur.execute("""
+                        INSERT INTO user_achievements (user_id, achievement_id, unlocked_at)
+                        VALUES (?, ?, ?)
+                    """, (user_id, achievement_id, now))
+                
+                # Award rewards
+                _award_coins(user_id, achievement['reward_coins'])
+                _award_xp(user_id, achievement['reward_xp'])
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error awarding achievement: {e}")
+            return False
+    
+    @staticmethod
+    def get_user_achievements(user_id: int) -> list:
+        """Get all unlocked achievements for user"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                cur.execute(
+                    f"SELECT achievement_id, unlocked_at FROM user_achievements WHERE user_id = {param_style}",
+                    (user_id,)
+                )
+                
+                unlocked = []
+                for row in cur.fetchall():
+                    achievement_id = row['achievement_id']
+                    if achievement_id in AchievementSystem.ACHIEVEMENTS:
+                        achievement = AchievementSystem.ACHIEVEMENTS[achievement_id].copy()
+                        achievement['unlocked_at'] = row['unlocked_at']
+                        unlocked.append(achievement)
+                
+                return unlocked
+        except Exception as e:
+            logger.error(f"Error getting achievements: {e}")
+            return []
+
+    @staticmethod
+    def generate_achievement_display(achievements: list) -> str:
+        """Create achievement showcase"""
+        if not achievements:
+            return "🏆 No achievements unlocked yet!\nPlay matches to unlock achievements!"
+        
+        display = (
+            f"{'🏆'*15}\n"
+            f"  YOUR ACHIEVEMENTS\n"
+            f"{'🏆'*15}\n\n"
+        )
+        
+        for achievement in achievements:
+            display += (
+                f"{achievement.get('icon', '🎖️')} <b>{achievement.get('name')}</b>\n"
+                f"   {achievement.get('description')}\n"
+                f"   Reward: {achievement.get('reward_coins')} coins | {achievement.get('reward_xp')} XP\n"
+                f"   Unlocked: {achievement.get('unlocked_at', 'Unknown')[:10]}\n\n"
+            )
+        
+        total = len(achievements)
+        available = len(AchievementSystem.ACHIEVEMENTS)
+        display += f"Progress: {total}/{available} achievements unlocked"
+        
+        return display
+    
+def create_additional_tables():
+    """Create tables for new features"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                autoincrement = "SERIAL PRIMARY KEY"
+                bigint = "BIGINT"
+                bool_type = "BOOLEAN"
+                bool_default = "FALSE"
+                text_type = "TEXT"
+                timestamp_type = "TIMESTAMPTZ"
+            else:
+                autoincrement = "INTEGER PRIMARY KEY AUTOINCREMENT"
+                bigint = "INTEGER"
+                bool_type = "INTEGER"
+                bool_default = "0"
+                text_type = "TEXT"
+                timestamp_type = "TEXT"
+            
+            # User achievements table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_achievements (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    achievement_id {text_type} NOT NULL,
+                    unlocked_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, achievement_id)
+                )
+            """)
+            
+            # Match analytics table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS match_analytics (
+                    id {autoincrement},
+                    match_id {text_type} NOT NULL,
+                    user_id {bigint} NOT NULL,
+                    total_balls INTEGER DEFAULT 0,
+                    dot_balls INTEGER DEFAULT 0,
+                    singles INTEGER DEFAULT 0,
+                    boundaries INTEGER DEFAULT 0,
+                    sixes INTEGER DEFAULT 0,
+                    wickets INTEGER DEFAULT 0,
+                    run_rate {text_type},
+                    strike_rate {text_type},
+                    created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Leaderboards table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS leaderboards (
+                    id {autoincrement},
+                    category {text_type} NOT NULL,
+                    user_id {bigint} NOT NULL,
+                    value INTEGER DEFAULT 0,
+                    updated_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(category, user_id)
+                )
+            """)
+            
+            # User inventory/items table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_inventory (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    item_type {text_type} NOT NULL,
+                    item_id {text_type} NOT NULL,
+                    quantity INTEGER DEFAULT 1,
+                    acquired_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, item_type, item_id)
+                )
+            """)
+            
+            # Power-ups table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS powerups (
+                    id {autoincrement},
+                    name {text_type} NOT NULL,
+                    description {text_type},
+                    effect_type {text_type},
+                    effect_value {text_type},
+                    duration INTEGER,
+                    cost INTEGER DEFAULT 0
+                )
+            """)
+            
+            # User friends/social table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_friends (
+                    user_id {bigint} NOT NULL,
+                    friend_id {bigint} NOT NULL,
+                    status {text_type} DEFAULT 'pending',
+                    created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, friend_id)
+                )
+            """)    
+            
+            # Match replays table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS match_replays (
+                    id {autoincrement},
+                    match_id {text_type} NOT NULL,
+                    user_id {bigint} NOT NULL,
+                    ball_by_ball {text_type},
+                    highlights {text_type},
+                    created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            logger.info("Additional tables created successfully")
+    except Exception as e:
+        logger.error(f"Error creating additional tables: {e}")
+
+
+
 def save_tournament_to_db(tournament: EliteTournament, chat_id: int = None):
     """Save tournament state to database"""
     try:
@@ -2201,6 +2787,452 @@ def load_tournament_from_db(tournament_id: str) -> Optional[EliteTournament]:
         logger.error(f"Error loading tournament: {e}")
         return None
     
+def calculate_dynamic_difficulty(game: GameState, user_stats: dict) -> float:
+    """Adjust bot difficulty based on player performance"""
+    difficulty_map = {"easy": 0.4, "medium": 0.6, "hard": 0.8, "expert": 0.9}
+    base_difficulty = difficulty_map.get(game.data.get('difficulty_level', 'medium'), 0.6)
+    
+    # Adjust based on player's recent performance
+    win_rate = user_stats.get('wins', 0) / max(user_stats.get('games_played', 1), 1)
+    avg_score = user_stats.get('avg_score', 0)
+    
+    if win_rate > 0.7:
+        base_difficulty += 0.1
+    elif win_rate < 0.3:
+        base_difficulty -= 0.1
+    
+    if avg_score > 50:
+        base_difficulty += 0.05
+    
+    return max(0.3, min(0.95, base_difficulty))
+
+
+def apply_weather_pitch_effects(game: GameState, outcome: str, runs: int) -> int:
+    """Modify runs based on weather and pitch conditions"""
+    weather = game.data.get('weather_condition', 'clear')
+    pitch = game.data.get('pitch_condition', 'normal')
+    
+    weather_multiplier = WEATHER_CONDITIONS.get(weather, {}).get('effect', 1.0)
+    pitch_data = PITCH_CONDITIONS.get(pitch, {})
+    
+    # Apply weather effect
+    if random.random() > weather_multiplier and runs > 0:
+        runs = max(0, runs - 1)  # Weather reduces runs
+    
+    # Apply pitch effect based on shot type
+    if outcome == 'boundary' and random.random() < pitch_data.get('batting_bonus', 1.0):
+        if runs == 4 and random.random() > 0.7:
+            runs = 6  # Flat pitch upgrades 4 to 6
+    
+    return runs
+
+
+def generate_ball_commentary(outcome: str, runs: int, player_name: str, is_powerplay: bool) -> str:
+    """Generate dynamic commentary for each ball"""
+    commentaries = {
+        'six': [
+            f"💥 MASSIVE HIT by {player_name}! That's gone into the stands!",
+            f"🚀 BOOM! {player_name} sends it sailing over the boundary!",
+            f"⚡ INCREDIBLE SHOT! {player_name} launches it for a MAXIMUM!",
+            f"🎯 What a hit! {player_name} connects perfectly - SIX RUNS!"
+        ],
+        'four': [
+            f"⚡ BOUNDARY! {player_name} finds the gap beautifully!",
+            f"🎯 Perfectly placed by {player_name} - FOUR RUNS!",
+            f"💫 Exquisite timing from {player_name}! Races to the boundary!",
+            f"🏏 Classic shot! {player_name} beats the fielders!"
+        ],
+        'wicket': [
+            f"💥 OUT! {player_name} is dismissed!",
+            f"🎯 BREAKTHROUGH! The bowler strikes!",
+            f"💔 {player_name} has to go! What a delivery!",
+            f"🔥 WICKET! The bowler gets the better of {player_name}!"
+        ],
+        'dot': [
+            f"Solid defense by {player_name}",
+            f"Good bowling - dot ball",
+            f"{player_name} watchfully defends",
+            f"No run - pressure building"
+        ],
+        'single': [
+            f"Quick single taken by {player_name}",
+            f"Good running - one run",
+            f"{player_name} rotates the strike",
+            f"Smart cricket - single"
+        ]
+    }
+    
+    if runs == 6:
+        commentary = random.choice(commentaries['six'])
+    elif runs == 4:
+        commentary = random.choice(commentaries['four'])
+    elif runs == 0 and outcome == 'wicket':
+        commentary = random.choice(commentaries['wicket'])
+    elif runs == 0:
+        commentary = random.choice(commentaries['dot'])
+    elif runs == 1:
+        commentary = random.choice(commentaries['single'])
+    else:
+        commentary = f"{runs} runs scored by {player_name}"
+    
+    if is_powerplay:
+        commentary += " [⚡ POWERPLAY]"
+    
+    return commentary
+
+
+def handle_milestone_achievement(chat_id: int, user_id: int, milestone_type: str, value: int):
+    """Celebrate player milestones"""
+    milestone_messages = {
+        'fifty': f"🎉 FIFTY UP! Brilliant knock! {value} runs!",
+        'century': f"💯 CENTURY! What an innings! {value}* - LEGENDARY!",
+        'duck': f"🦆 Out for a duck! Better luck next time!",
+        'hat_trick': f"🎩 HAT-TRICK! Three wickets in three balls!",
+        'perfect_over': f"🎯 PERFECT OVER! 6 dot balls - Magnificent bowling!"
+    }
+    
+    message = milestone_messages.get(milestone_type, f"Achievement: {milestone_type}")
+    
+    AnimationManager.send_animation(chat_id, milestone_type, message)
+    
+    # Award bonus XP for milestones
+    xp_rewards = {
+        'fifty': 50,
+        'century': 150,
+        'hat_trick': 100,
+        'perfect_over': 75
+    }
+    
+    if milestone_type in xp_rewards:
+        _award_xp(user_id, xp_rewards[milestone_type])
+
+
+def generate_live_scorecard(game: GameState) -> str:
+    """Create detailed live scorecard"""
+    batting = game.data.get('batting')
+    innings = game.data.get('innings', 1)
+    
+    player_score = game.data.get('player_score', 0)
+    player_wickets = game.data.get('player_wkts', 0)
+    player_balls = game.data.get('player_balls_faced', 0)
+    player_fours = game.data.get('player_fours', 0)
+    player_sixes = game.data.get('player_sixes', 0)
+    
+    bot_score = game.data.get('bot_score', 0)
+    bot_wickets = game.data.get('bot_wkts', 0)
+    bot_balls = game.data.get('bot_balls_faced', 0)
+    bot_fours = game.data.get('bot_fours', 0)
+    bot_sixes = game.data.get('bot_sixes', 0)
+    
+    overs = game.data.get('overs_bowled', 0)
+    balls_in_over = game.data.get('balls_in_over', 0)
+    overs_limit = game.data.get('overs_limit', DEFAULT_OVERS)
+    target = game.data.get('target')
+    
+    # Calculate strike rates
+    player_sr = (player_score / player_balls * 100) if player_balls > 0 else 0
+    bot_sr = (bot_score / bot_balls * 100) if bot_balls > 0 else 0
+    
+    # Calculate run rate
+    total_balls = overs * 6 + balls_in_over
+    current_rr = (player_score / (total_balls / 6)) if batting == 'player' and total_balls > 0 else 0
+    current_rr = (bot_score / (total_balls / 6)) if batting == 'bot' and total_balls > 0 else 0
+    
+    weather = game.data.get('weather_condition', 'clear')
+    pitch = game.data.get('pitch_condition', 'normal')
+    is_powerplay = game.data.get('is_powerplay', False)
+    
+    scorecard = (
+        f"╔{'═'*48}╗\n"
+        f"║  {game.data.get('match_format', 'T2')} CRICKET - INNINGS {innings}           ║\n"
+        f"╚{'═'*48}╝\n\n"
+    )
+    
+    if batting == 'player':
+        scorecard += (
+            f"🏏 YOU (Batting)\n"
+            f"   Score: {player_score}/{player_wickets}\n"
+            f"   Overs: {overs}.{balls_in_over}/{overs_limit}\n"
+            f"   SR: {player_sr:.1f}% | RR: {current_rr:.2f}\n"
+            f"   Boundaries: 4️⃣ {player_fours} | 6️⃣ {player_sixes}\n\n"
+            f"🤖 BOT\n"
+            f"   Score: {bot_score}/{bot_wickets}\n"
+        )
+        if target:
+            need = target - player_score
+            req_rr = (need / ((overs_limit - overs) + (6 - balls_in_over) / 6)) if overs < overs_limit else 0
+            scorecard += f"\n🎯 Target: {target} | Need: {need} | Req RR: {req_rr:.2f}\n"
+    else:
+        scorecard += (
+            f"🤖 BOT (Batting)\n"
+            f"   Score: {bot_score}/{bot_wickets}\n"
+            f"   Overs: {overs}.{balls_in_over}/{overs_limit}\n"
+            f"   SR: {bot_sr:.1f}% | RR: {current_rr:.2f}\n"
+            f"   Boundaries: 4️⃣ {bot_fours} | 6️⃣ {bot_sixes}\n\n"
+            f"🏏 YOU\n"
+            f"   Score: {player_score}/{player_wickets}\n"
+        )
+        if target:
+            need = target - bot_score
+            req_rr = (need / ((overs_limit - overs) + (6 - balls_in_over) / 6)) if overs < overs_limit else 0
+            scorecard += f"\n🎯 Target: {target} | Need: {need} | Req RR: {req_rr:.2f}\n"
+    
+    scorecard += (
+        f"\n{'─'*48}\n"
+        f"🌤️ Weather: {weather.title()} | 🏟️ Pitch: {pitch.title()}\n"
+    )
+    
+    if is_powerplay:
+        powerplay_overs = game.data.get('powerplay_overs', 0)
+        scorecard += f"⚡ POWERPLAY ({powerplay_overs} overs)\n"
+    
+    return scorecard
+
+
+def generate_wagon_wheel(fours: int, sixes: int) -> str:
+    """Create ASCII wagon wheel visualization"""
+    wagon = [
+        "         N",
+        "        /|\\",
+        "   NW  / | \\  NE",
+        "      /  |  \\",
+        " W ——————⚫——————— E",
+        "      \\  |  /",
+        "   SW  \\ | /  SE",
+        "        \\|/",
+        "         S"
+    ]
+    
+    stats = (
+        f"\n📊 Shot Distribution:\n"
+        f"{'─'*30}\n"
+        f"   Boundaries: {fours + sixes}\n"
+        f"   4️⃣ Fours: {fours}\n"
+        f"   6️⃣ Sixes: {sixes}\n"
+    )
+    
+    return "\n".join(wagon) + "\n" + stats
+
+
+def generate_manhattan_chart(scores_per_over: list) -> str:
+    """Create ASCII Manhattan (runs per over) chart"""
+    if not scores_per_over:
+        return "No data available"
+    
+    max_score = max(scores_per_over) if scores_per_over else 1
+    chart = "📈 Runs Per Over:\n" + "─" * 40 + "\n"
+    
+    for i, score in enumerate(scores_per_over, 1):
+        bar_length = int((score / max_score) * 20) if max_score > 0 else 0
+        bar = "█" * bar_length
+        chart += f"Over {i:2d} | {bar} {score}\n"
+    
+    return chart
+
+
+def handle_tournament_bracket_progression(tournament: EliteTournament, match: TournamentMatch):
+    """Progress winners through tournament bracket"""
+    if match.match_state != 'completed' or not match.winner:
+        return
+    
+    winner_id = match.team1['id'] if match.winner == 'team1' else match.team2['id']
+    winner_name = match.team1['name'] if match.winner == 'team1' else match.team2['name']
+    
+    # Update standings
+    tournament.update_standings_after_match(match)
+    
+    # For knockout, advance winner to next round
+    if tournament.type == 'knockout':
+        current_round = tournament.current_round
+        next_round = current_round + 1
+        
+        if next_round <= tournament.total_rounds:
+            # Find the next match this winner should be in
+            next_round_matches = tournament.bracket['rounds'].get(next_round, {}).get('matches', [])
+            
+            for next_match in next_round_matches:
+                if next_match.team1['id'] is None:
+                    next_match.team1 = {'id': winner_id, 'name': winner_name}
+                    break
+                elif next_match.team2['id'] is None:
+                    next_match.team2 = {'id': winner_id, 'name': winner_name}
+                    break
+            
+            # Check if round is complete
+            current_round_matches = tournament.bracket['rounds'][current_round]['matches']
+            if all(m.match_state == 'completed' for m in current_round_matches):
+                tournament.current_round = next_round
+                _announce_round_complete(tournament, current_round)
+        else:
+            # Tournament complete!
+            tournament.tournament_state = 'completed'
+            tournament.ended_at = datetime.now(timezone.utc).isoformat()
+            _announce_tournament_winner(tournament, winner_id, winner_name)
+    
+    save_tournament_to_db(tournament)
+
+
+def _announce_round_complete(tournament: EliteTournament, round_num: int):
+    """Announce round completion and next matches"""
+    stage_name = tournament.theme_data['stage_names'].get(round_num + 1, f"Round {round_num + 1}")
+    
+    announcement = (
+        f"{'🎺'*5}\n"
+        f" {stage_name.upper()} BEGINS!\n"
+        f"{'🎺'*5}\n\n"
+        f"Upcoming Matches:\n"
+    )
+    
+    next_matches = tournament.bracket['rounds'][round_num + 1]['matches']
+    for i, match in enumerate(next_matches, 1):
+        announcement += f"{i}. {match.team1['emoji']} {match.team1['name']} vs {match.team2['emoji']} {match.team2['name']}\n"
+    
+    logger.info(announcement)
+
+
+def _announce_tournament_winner(tournament: EliteTournament, winner_id: int, winner_name: str):
+    """Celebrate tournament winner"""
+    announcement = (
+        f"{'🏆'*10}\n"
+        f" {tournament.name.upper()}\n"
+        f" CHAMPION: {winner_name}!\n"
+        f"{'🏆'*10}\n\n"
+        f"💰 Prize: {tournament.prize_pool} coins\n"
+        f"🎖️ Glory: Eternal!\n"
+    )
+    
+    # Award prizes
+    _award_coins(winner_id, tournament.prize_pool)
+    _award_xp(winner_id, 500)  # Bonus XP for tournament win
+    
+    logger.info(announcement)
+
+
+def generate_tournament_stats(tournament: EliteTournament) -> str:
+    """Generate comprehensive tournament statistics"""
+    stats = (
+        f"📊 {tournament.name} - STATISTICS\n"
+        f"{'═'*50}\n\n"
+        f"🎯 Format: {tournament.type.upper()} | {tournament.format_overs} Overs\n"
+        f"👥 Participants: {len(tournament.participants)}\n"
+        f"🏏 Matches Played: {sum(1 for m in tournament.matches if m.match_state == 'completed')}\n"
+        f"🎯 Current Round: {tournament.current_round}/{tournament.total_rounds}\n\n"
+        f"🏆 RECORDS:\n"
+        f"   Highest Score: {tournament.records.get('highest_score', 0)}\n"
+        f"   Most Sixes: {tournament.records.get('most_sixes', 0)}\n"
+        f"   Most Boundaries: {tournament.records.get('most_boundaries', 0)}\n\n"
+    )
+    
+    # Top performers
+    stats += "🌟 TOP PERFORMERS:\n"
+    sorted_participants = sorted(
+        tournament.participants,
+        key=lambda p: p.get('runs_scored', 0),
+        reverse=True
+    )[:3]
+    
+    for i, player in enumerate(sorted_participants, 1):
+        medal = ['🥇', '🥈', '🥉'][i-1]
+        stats += f"   {medal} {player['username']}: {player.get('runs_scored', 0)} runs\n"
+    
+    return stats
+
+
+def kb_match_actions(game: GameState) -> types.InlineKeyboardMarkup:
+    """Enhanced match action buttons"""
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    
+    batting = game.data.get('batting')
+    
+    if batting == 'player':
+        # Batting options
+        kb.add(
+            types.InlineKeyboardButton("🛡️ Defend", callback_data="shot_defend"),
+            types.InlineKeyboardButton("⚡ Attack", callback_data="shot_attack"),
+            types.InlineKeyboardButton("🚀 Big Hit", callback_data="shot_big")
+        )
+        kb.add(
+            types.InlineKeyboardButton("1️⃣ Single", callback_data="shot_single"),
+            types.InlineKeyboardButton("2️⃣ Two", callback_data="shot_two"),
+            types.InlineKeyboardButton("💪 Boundaries", callback_data="shot_boundary")
+        )
+    else:
+        # Bowling options
+        kb.add(
+            types.InlineKeyboardButton("🎯 Yorker", callback_data="bowl_yorker"),
+            types.InlineKeyboardButton("⚡ Bouncer", callback_data="bowl_bouncer"),
+            types.InlineKeyboardButton("🌀 Spin", callback_data="bowl_spin")
+        )
+        kb.add(
+            types.InlineKeyboardButton("🎪 Slower", callback_data="bowl_slower"),
+            types.InlineKeyboardButton("💨 Fast", callback_data="bowl_fast"),
+            types.InlineKeyboardButton("📐 Wide Yorker", callback_data="bowl_wide_yorker")
+        )
+    
+    kb.add(
+        types.InlineKeyboardButton("📊 Scorecard", callback_data="view_scorecard"),
+        types.InlineKeyboardButton("📈 Stats", callback_data="view_match_stats")
+    )
+    kb.add(types.InlineKeyboardButton("❌ Forfeit", callback_data="forfeit_match"))
+    
+    return kb
+
+
+def kb_post_match(match_result: dict) -> types.InlineKeyboardMarkup:
+    """Post-match options"""
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    
+    kb.add(
+        types.InlineKeyboardButton("🔄 Play Again", callback_data="quick_play"),
+        types.InlineKeyboardButton("📊 Match Stats", callback_data="detailed_stats")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🏆 View Challenges", callback_data="challenges"),
+        types.InlineKeyboardButton("🎯 Tournaments", callback_data="tournaments")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📈 My Progress", callback_data="my_profile"),
+        types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
+    )
+    
+    return kb
+
+
+def kb_format_selector() -> types.InlineKeyboardMarkup:
+    """Enhanced format selection"""
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    
+    for format_key, format_data in TOURNAMENT_FORMATS.items():
+        emoji = format_data['name'].split()[0]
+        text = f"{emoji} {format_data['overs']}ov | {format_data['wickets']}wk"
+        kb.add(types.InlineKeyboardButton(text, callback_data=f"format_{format_key}"))
+    
+    kb.add(
+        types.InlineKeyboardButton("🎯 Custom", callback_data="format_custom"),
+        types.InlineKeyboardButton("🔙 Back", callback_data="main_menu")
+    )
+    
+    return kb
+
+
+def kb_difficulty_selector() -> types.InlineKeyboardMarkup:
+    """Difficulty selection with descriptions"""
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    
+    difficulties = [
+        ("🟢 Easy", "diff_easy", "Relaxed gameplay"),
+        ("🟡 Medium", "diff_medium", "Balanced challenge"),
+        ("🔴 Hard", "diff_hard", "Tough opponent"),
+        ("⚫ Expert", "diff_expert", "Maximum challenge")
+    ]
+    
+    for name, callback, desc in difficulties:
+        kb.add(types.InlineKeyboardButton(f"{name} - {desc}", callback_data=callback))
+    
+    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+    
+    return kb
+
 
 def _save_tournament_participant(tournament_id: int, user_id: int, position: int):
     try:
@@ -2224,13 +3256,12 @@ def _save_tournament_participant(tournament_id: int, user_id: int, position: int
 
 # Replace all database queries to use consistent parameter style
 def _get_user_coins(user_id: int) -> int:
-    """FIXED VERSION - proper column access"""
+    """Get user's coin balance"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
-            
             cur.execute(f"SELECT coins FROM users WHERE user_id = {param_style}", (user_id,))
             row = cur.fetchone()
             return row["coins"] if row else 0
@@ -2239,36 +3270,35 @@ def _get_user_coins(user_id: int) -> int:
         return 0
 
 def _deduct_user_coins(user_id: int, amount: int):
-    """Fixed version with consistent parameters"""
+    """Deduct coins from user"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
-            
-            cur.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (amount, user_id))
+            cur.execute(f"UPDATE users SET coins = coins - {param_style} WHERE user_id = {param_style}", (amount, user_id))
     except Exception as e:
-        logger.error(f"Error deducting user coins: {e}")
+        logger.error(f"Error deducting coins: {e}")
 
 def _award_coins(user_id: int, amount: int):
-    """Fixed version with consistent parameters"""
+    """Award coins to user"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
-            
             cur.execute(f"UPDATE users SET coins = coins + {param_style} WHERE user_id = {param_style}", (amount, user_id))
     except Exception as e:
         logger.error(f"Error awarding coins: {e}")
 
 def _award_xp(user_id: int, amount: int):
+    """Award XP to user"""
     UserLevelManager.update_user_level(user_id, amount)
 
 def create_daily_challenges():
+    """Create daily challenges for all users"""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
-        
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
@@ -2279,21 +3309,23 @@ def create_daily_challenges():
                 cur.execute("SELECT COUNT(*) as count FROM daily_challenges WHERE DATE(created_at) = ?", (today,))
             
             count = cur.fetchone()["count"]
+            
             if count > 0:
                 logger.info("Daily challenges already exist for today")
                 return
-        
-        challenges = DailyChallenge.generate_daily_challenges(today)
-        
-        for challenge in challenges:
-            _save_daily_challenge(challenge)
-        
-        logger.info(f"Created {len(challenges)} daily challenges for {today}")
-        
+            
+            challenges = DailyChallenge.generate_daily_challenges(today)
+            
+            for challenge in challenges:
+                _save_daily_challenge(challenge)
+            
+            logger.info(f"Created {len(challenges)} daily challenges for {today}")
     except Exception as e:
         logger.error(f"Error creating daily challenges: {e}")
 
+
 def _save_daily_challenge(challenge: DailyChallenge):
+    """Save a daily challenge to database"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -4147,34 +5179,28 @@ def setup_webhook():
     return False
 # Message handlers
 @bot.message_handler(commands=['start'])
+@rate_limit_check('command')
 def cmd_start(message):
+    """Handle /start command"""
     try:
-        logger.info(f"=== /START HANDLER TRIGGERED ===")
-        logger.info(f"User: {message.from_user.id} - {message.from_user.first_name}")
-        
-        # CRITICAL: Ensure user is created first
-        try:
-            ensure_user(message)
-            logger.info(f"User {message.from_user.id} ensured in database")
-        except Exception as e:
-            logger.error(f"Failed to ensure user: {e}", exc_info=True)
+        user_id = message.from_user.id
+        ensure_user_exists(user_id, message.from_user.username, message.from_user.first_name)
         
         welcome_text = (
             f"🏏 Welcome to Cricket Bot, {message.from_user.first_name}!\n\n"
-            f"🎮 The most advanced hand-cricket experience on Telegram!\n\n"
-            f"Ready to play some cricket?"
+            "Play realistic cricket matches against the bot!\n\n"
+            "Commands:\n"
+            "/quickmatch - Start a quick T2 match\n"
+            "/profile - View your profile\n"
+            "/leaderboard - View rankings\n"
+            "/daily - Daily challenges\n"
+            "/powerups - Power-ups shop\n"
+            "/help - Show all commands"
         )
         
-        logger.info(f"Sending welcome message to {message.chat.id}")
-        bot.send_message(message.chat.id, welcome_text, reply_markup=kb_main_menu())
-        logger.info(f"✓ Welcome message sent to {message.from_user.id}")
-        
+        bot.send_message(message.chat.id, welcome_text)
     except Exception as e:
-        logger.error(f"✗ Error in /start handler: {e}", exc_info=True)
-        try:
-            bot.reply_to(message, "Welcome! There was a minor issue, but you can still play. Try /play")
-        except:
-            pass
+        logger.error(f"Error in start command: {e}")
 
 
 @bot.message_handler(commands=['play'])
@@ -4513,6 +5539,974 @@ def handle_callback(call):
         logger.error(f"Error in callback handler: {e}", exc_info=True)
         bot.answer_callback_query(call.id, "An error occurred")
 
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('lb_'))
+@rate_limit_check('callback')
+def handle_leaderboard_callback(call):
+    """Handle leaderboard selection"""
+    try:
+        category = call.data.replace('lb_', '')
+        top_players = get_leaderboard(category, limit=10)
+        display = generate_leaderboard_display(category, top_players)
+        
+        bot.edit_message_text(
+            display,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb_leaderboard_categories()
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error in leaderboard callback: {e}")
+        bot.answer_callback_query(call.id, "Error loading leaderboard")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_powerup_'))
+@rate_limit_check('callback')
+def handle_powerup_purchase_callback(call):
+    """Handle power-up purchase"""
+    try:
+        powerup_id = call.data.replace('buy_powerup_', '')
+        result = handle_powerup_purchase(call.from_user.id, powerup_id)
+        
+        bot.answer_callback_query(call.id, result['message'], show_alert=True)
+        
+        if result['success']:
+            # Refresh shop display
+            shop_text = (
+                "🛒 POWER-UPS SHOP\n\n"
+                "Purchase power-ups to gain advantages in matches!\n"
+                "Use them before starting a match.\n\n"
+            )
+            
+            for pid, powerup in PowerUp.POWERUPS.items():
+                shop_text += (
+                    f"{powerup['name']}\n"
+                    f"  {powerup['description']}\n"
+                    f"  Duration: {powerup['duration']} over(s) | Cost: {powerup['cost']} coins\n\n"
+                )
+            
+            user_coins = _get_user_coins(call.from_user.id)
+            shop_text += f"💰 Your coins: {user_coins}"
+            
+            bot.edit_message_text(
+                shop_text,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=kb_powerups_shop()
+            )
+    except Exception as e:
+        logger.error(f"Error in powerup purchase callback: {e}")
+        bot.answer_callback_query(call.id, "Purchase failed")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'view_scorecard')
+@rate_limit_check('callback')
+def handle_scorecard_view(call):
+    """Show detailed scorecard"""
+    try:
+        game = GameState(call.message.chat.id)
+        scorecard = generate_live_scorecard(game)
+        
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, f"<pre>{scorecard}</pre>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error showing scorecard: {e}")
+        bot.answer_callback_query(call.id, "Error loading scorecard")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'challenges_view')
+@rate_limit_check('callback')
+def handle_challenges_view(call):
+    """Show active challenges"""
+    try:
+        tracker = ChallengeTracker(call.from_user.id)
+        
+        if not tracker.active_challenges:
+            message = "📋 No active challenges!\nChallenges reset daily at midnight UTC."
+        else:
+            message = "📋 DAILY CHALLENGES\n" + "═" * 40 + "\n\n"
+            
+            for challenge in tracker.active_challenges:
+                progress = tracker.progress.get(challenge['id'], 0)
+                target = challenge['target']
+                completed = challenge.get('completed', False)
+                
+                status = "✅" if completed else f"{progress}/{target}"
+                
+                message += (
+                    f"{challenge.get('icon', '🎯')} {challenge['description']}\n"
+                    f"   Progress: {status}\n"
+                    f"   Reward: {challenge['reward_coins']} coins | {challenge['reward_xp']} XP\n\n"
+                )
+        
+        bot.edit_message_text(
+            message,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb_challenges()
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error viewing challenges: {e}")
+        bot.answer_callback_query(call.id, "Error loading challenges")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('shot_'))
+@rate_limit_check('callback')
+def handle_shot_selection(call):
+    """Handle batting shot selection"""
+    try:
+        shot_type = call.data.replace('shot_', '')
+        game = GameState(call.message.chat.id)
+        
+        if game.data.get('batting') != 'player':
+            bot.answer_callback_query(call.id, "It's not your turn to bat!")
+            return
+        
+        # Map shot types to aggressive levels
+        shot_aggression = {
+            'defend': 0.2,
+            'single': 0.4,
+            'two': 0.5,
+            'attack': 0.7,
+            'boundary': 0.85,
+            'big': 0.95
+        }
+        
+        aggression = shot_aggression.get(shot_type, 0.5)
+        
+        # Simulate ball outcome based on shot
+        outcome = simulate_player_ball(game, aggression)
+        
+        # Update game state and show result
+        commentary = generate_ball_commentary(
+            outcome['type'],
+            outcome['runs'],
+            call.from_user.first_name,
+            game.data.get('is_powerplay', False)
+        )
+        
+        bot.answer_callback_query(call.id, commentary[:200])  # Show in popup
+        
+        # Send full update
+        scorecard = generate_live_scorecard(game)
+        bot.send_message(
+            call.message.chat.id,
+            f"{commentary}\n\n<pre>{scorecard}</pre>",
+            parse_mode="HTML",
+            reply_markup=kb_match_actions(game)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling shot selection: {e}")
+        bot.answer_callback_query(call.id, "Error processing shot")
+
+
+def simulate_player_ball(game: GameState, aggression: float) -> dict:
+    """Simulate a ball based on player's shot selection"""
+    difficulty = calculate_dynamic_difficulty(game, {})  # Pass user stats if available
+    
+    # Check for active power-ups
+    powerup_effects = PowerUp.check_powerup_effects(game, 'batting')
+    boundary_bonus = powerup_effects.get('boundary_bonus', 0)
+    
+    # Wicket probability (inverse to aggression)
+    wicket_chance = difficulty * (aggression * 0.3)
+    
+    # Check for wicket protection power-up
+    wicket_save_chance = powerup_effects.get('wicket_save_chance', 0)
+    if random.random() < wicket_save_chance:
+        wicket_chance = 0  # Power-up saves from wicket
+    
+    # Auto-save wicket power-up
+    if powerup_effects.get('auto_save_wicket') and random.random() < wicket_chance:
+        wicket_chance = 0
+        bot.send_message(game.chat_id, "🛡️ WICKET GUARD activated! Wicket saved!")
+    
+    if random.random() < wicket_chance:
+        game.data['player_wkts'] += 1
+        return {'type': 'wicket', 'runs': 0}
+    
+    # Runs distribution based on aggression
+    rand = random.random()
+    
+    if aggression > 0.85:  # Big shot
+        if rand < 0.25 + boundary_bonus:
+            runs = 6
+        elif rand < 0.45 + boundary_bonus:
+            runs = 4
+        elif rand < 0.65:
+            runs = random.choice([1, 2, 3])
+        else:
+            runs = 0  # Dot ball
+    elif aggression > 0.65:  # Aggressive
+        if rand < 0.15 + boundary_bonus:
+            runs = 6
+        elif rand < 0.35 + boundary_bonus:
+            runs = 4
+        elif rand < 0.70:
+            runs = random.choice([1, 2, 3])
+        else:
+            runs = 0
+    elif aggression > 0.45:  # Moderate
+        if rand < 0.05 + boundary_bonus:
+            runs = 6
+        elif rand < 0.20 + boundary_bonus:
+            runs = 4
+        elif rand < 0.75:
+            runs = random.choice([1, 2])
+        else:
+            runs = 0
+    else:  # Defensive
+        if rand < 0.02:
+            runs = 4
+        elif rand < 0.60:
+            runs = random.choice([0, 1])
+        else:
+            runs = 0
+    
+    # Apply weather/pitch effects
+    runs = apply_weather_pitch_effects(game, 'batting', runs)
+    
+    # Update game stats
+    game.data['player_score'] += runs
+    game.data['player_balls_faced'] += 1
+    game.data['balls_in_over'] += 1
+    
+    if runs == 4:
+        game.data['player_fours'] += 1
+    elif runs == 6:
+        game.data['player_sixes'] += 1
+    
+    # Check over completion
+    if game.data['balls_in_over'] >= 6:
+        game.data['balls_in_over'] = 0
+        game.data['overs_bowled'] += 1
+        PowerUp.update_powerup_durations(game)
+    
+    game.save()
+    
+    return {'type': 'runs' if runs > 0 else 'dot', 'runs': runs}
+
+
+@bot.message_handler(commands=['powerups'])
+@rate_limit_check('command')
+def cmd_powerups(message):
+    """Show power-ups shop"""
+    try:
+        user_coins = _get_user_coins(message.from_user.id)
+        
+        shop_text = (
+            "🛒 POWER-UPS SHOP\n\n"
+            "Purchase power-ups to gain advantages in matches!\n\n"
+        )
+        
+        for powerup_id, powerup in PowerUp.POWERUPS.items():
+            shop_text += (
+                f"{powerup['name']}\n"
+                f"  {powerup['description']}\n"
+                f"  Duration: {powerup['duration']} over(s) | Cost: {powerup['cost']} coins\n\n"
+            )
+        
+        shop_text += f"💰 Your coins: {user_coins}"
+        
+        bot.send_message(
+            message.chat.id,
+            shop_text,
+            reply_markup=kb_powerups_shop()
+        )
+    except Exception as e:
+        logger.error(f"Error in powerups command: {e}")
+
+
+
+@bot.message_handler(commands=['achievements'])
+@rate_limit_check('command')
+def cmd_achievements(message):
+    """Show user achievements"""
+    try:
+        achievements = AchievementSystem.get_user_achievements(message.from_user.id)
+        display = AchievementSystem.generate_achievement_display(achievements)
+        
+        bot.send_message(message.chat.id, display, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in achievements command: {e}")
+        bot.reply_to(message, "❌ Error loading achievements")
+
+
+@bot.message_handler(commands=['leaderboard', 'rankings'])
+@rate_limit_check('command')
+def cmd_leaderboard(message):
+    """Show leaderboards"""
+    try:
+        text = (
+            "🏆 LEADERBOARDS 🏆\n\n"
+            "Choose a category to view rankings:\n"
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            text,
+            reply_markup=kb_leaderboard_categories()
+        )
+    except Exception as e:
+        logger.error(f"Error in leaderboard command: {e}")
+
+
+
+@bot.message_handler(commands=['inventory'])
+@rate_limit_check('command')
+def cmd_inventory(message):
+    """Show user inventory"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"""
+                SELECT item_type, item_id, quantity
+                FROM user_inventory
+                WHERE user_id = {param_style}
+            """, (message.from_user.id,))
+            
+            items = cur.fetchall()
+            
+            if not items:
+                text = "🎒 Your inventory is empty!\nPurchase items from /powerups"
+            else:
+                text = "🎒 YOUR INVENTORY\n" + "═" * 40 + "\n\n"
+                
+                for item in items:
+                    item_type = item['item_type']
+                    item_id = item['item_id']
+                    quantity = item['quantity']
+                    
+                    if item_type == 'powerup' and item_id in PowerUp.POWERUPS:
+                        powerup = PowerUp.POWERUPS[item_id]
+                        text += f"{powerup['name']} x{quantity}\n"
+                
+                text += f"\n💡 Use /powerups to purchase more items"
+            
+            bot.send_message(message.chat.id, text)
+    except Exception as e:
+        logger.error(f"Error in inventory command: {e}")
+        bot.reply_to(message, "❌ Error loading inventory")
+
+
+@bot.message_handler(commands=['profile'])
+@rate_limit_check('command')
+def cmd_profile(message):
+    """Show user profile"""
+    try:
+        user_id = message.from_user.id
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get user data
+            cur.execute(f"SELECT * FROM users WHERE user_id = {param_style}", (user_id,))
+            user = cur.fetchone()
+            
+            if not user:
+                bot.reply_to(message, "Profile not found. Use /start to create your profile!")
+                return
+            
+            # Get stats
+            cur.execute(f"SELECT * FROM stats WHERE user_id = {param_style}", (user_id,))
+            stats = cur.fetchone()
+            
+            # Get level
+            cur.execute(f"SELECT * FROM user_levels WHERE user_id = {param_style}", (user_id,))
+            level = cur.fetchone()
+            
+            games_played = stats['games_played'] if stats else 0
+            wins = stats['wins'] if stats else 0
+            win_rate = (wins / games_played * 100) if games_played > 0 else 0
+            
+            profile_text = (
+                f"{'═'*50}\n"
+                f"👤 PLAYER PROFILE\n"
+                f"{'═'*50}\n\n"
+                f"🆔 Name: {user['first_name']}\n"
+                f"💎 Level: {level['level'] if level else 1}\n"
+                f"💰 Coins: {user['coins']}\n\n"
+                f"📈 STATISTICS\n"
+                f"{'─'*50}\n"
+                f"🎮 Matches: {games_played}\n"
+                f"✅ Wins: {wins}\n"
+                f"📊 Win Rate: {win_rate:.1f}%\n"
+            )
+            
+            if stats:
+                profile_text += f"🏏 High Score: {stats['high_score']}\n"
+            
+            bot.send_message(message.chat.id, profile_text)
+            
+    except Exception as e:
+        logger.error(f"Error in profile command: {e}")
+
+
+@bot.message_handler(commands=['replay'])
+@rate_limit_check('command')
+def cmd_replay(message):
+    """Show last match replay/summary"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"""
+                SELECT * FROM match_history
+                WHERE user_id = {param_style}
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (message.from_user.id,))
+            
+            last_match = cur.fetchone()
+            
+            if not last_match:
+                bot.reply_to(message, "No match history found!")
+                return
+            
+            # Build replay display
+            replay = (
+                f"{'🎬'*15}\n"
+                f"  MATCH REPLAY\n"
+                f"{'🎬'*15}\n\n"
+                f"Format: {last_match['match_format']}\n"
+                f"Date: {last_match['created_at'][:19]}\n\n"
+                f"{'─'*40}\n"
+                f"🏏 YOUR INNINGS\n"
+                f"{'─'*40}\n"
+                f"Score: {last_match['player_score']}/{last_match['player_wickets']}\n"
+                f"Overs: {last_match['overs_played']:.1f}\n"
+                f"Strike Rate: {last_match['player_strike_rate']:.1f}\n\n"
+                f"{'─'*40}\n"
+                f"🤖 BOT INNINGS\n"
+                f"{'─'*40}\n"
+                f"Score: {last_match['bot_score']}/{last_match['bot_wickets']}\n\n"
+                f"{'═'*40}\n"
+            )
+            
+            result = last_match['result']
+            margin = last_match['margin']
+            
+            if result == 'win':
+                replay += f"🏆 YOU WON by {margin}!\n"
+            elif result == 'loss':
+                replay += f"💔 YOU LOST by {margin}\n"
+            else:
+                replay += f"🤝 MATCH TIED!\n"
+            
+            replay += f"{'═'*40}\n"
+            replay += f"Duration: {last_match['match_duration_minutes']} minutes"
+            
+            bot.send_message(message.chat.id, replay)
+            
+    except Exception as e:
+        logger.error(f"Error in replay command: {e}")
+        bot.reply_to(message, "❌ Error loading replay")
+
+
+@bot.message_handler(commands=['daily'])
+@rate_limit_check('command')
+def cmd_daily(message):
+    """Show daily challenges"""
+    try:
+        tracker = ChallengeTracker(message.from_user.id)
+        
+        if not tracker.active_challenges:
+            text = (
+                "📋 DAILY CHALLENGES\n\n"
+                "No active challenges at the moment!\n"
+                "Challenges refresh daily at midnight UTC.\n\n"
+                "Come back later! 🎯"
+            )
+        else:
+            text = (
+                "📋 DAILY CHALLENGES\n"
+                "Complete challenges to earn rewards!\n"
+                f"{'═'*40}\n\n"
+            )
+            
+            for challenge in tracker.active_challenges:
+                progress = tracker.progress.get(challenge['id'], 0)
+                target = challenge['target']
+                completed = challenge.get('completed', False)
+                claimed = challenge.get('claimed', False)
+                
+                if completed and claimed:
+                    status = "✅ CLAIMED"
+                elif completed:
+                    status = "🎁 READY TO CLAIM"
+                else:
+                    status = f"📊 {progress}/{target}"
+                
+                text += (
+                    f"{challenge.get('icon', '🎯')} {challenge['description']}\n"
+                    f"   Status: {status}\n"
+                    f"   Reward: {challenge['reward_coins']} coins | {challenge['reward_xp']} XP\n\n"
+                )
+        
+        bot.send_message(message.chat.id, text)
+        
+    except Exception as e:
+        logger.error(f"Error in daily command: {e}")
+
+
+@bot.message_handler(commands=['quickmatch', 'qm'])
+@rate_limit_check('command')
+def cmd_quick_match(message):
+    """Start a quick match"""
+    try:
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        
+        ensure_user_exists(user_id, message.from_user.username, message.from_user.first_name)
+        
+        game = GameState(chat_id)
+        game.data = default_game(chat_id)
+        game.save()
+        
+        text = (
+            "⚡ QUICK MATCH STARTED! ⚡\n\n"
+            f"Format: T2 (2 overs, 1 wicket)\n"
+            f"Difficulty: Medium\n\n"
+            "Time to toss the coin! 🪙"
+        )
+        
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("🪙 Heads", callback_data="toss_heads"),
+            types.InlineKeyboardButton("🪙 Tails", callback_data="toss_tails")
+        )
+        
+        bot.send_message(chat_id, text, reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error in quick match: {e}")
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'view_achievements')
+@rate_limit_check('callback')
+def handle_view_achievements_callback(call):
+    """Show achievements from profile"""
+    try:
+        achievements = AchievementSystem.get_user_achievements(call.from_user.id)
+        display = AchievementSystem.generate_achievement_display(achievements)
+        
+        bot.send_message(call.message.chat.id, display, parse_mode="HTML")
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error viewing achievements: {e}")
+        bot.answer_callback_query(call.id, "Error loading achievements")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'shop')
+@rate_limit_check('callback')
+def handle_shop_callback(call):
+    """Show shop from profile"""
+    try:
+        user_coins = _get_user_coins(call.from_user.id)
+        
+        shop_text = (
+            "🛒 CRICKET BOT SHOP\n"
+            f"{'═'*40}\n\n"
+            "💪 POWER-UPS\n"
+            "Boost your performance in matches!\n\n"
+        )
+        
+        for powerup_id, powerup in PowerUp.POWERUPS.items():
+            shop_text += f"{powerup['name']} - {powerup['cost']} coins\n"
+        
+        shop_text += (
+            f"\n{'─'*40}\n"
+            f"💰 Your Balance: {user_coins} coins\n\n"
+            "Use /powerups to purchase items!"
+        )
+        
+        bot.send_message(call.message.chat.id, shop_text)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing shop: {e}")
+        bot.answer_callback_query(call.id, "Error loading shop")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'inventory')
+@rate_limit_check('callback')
+def handle_inventory_callback(call):
+    """Show inventory from profile"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"""
+                SELECT item_type, item_id, quantity
+                FROM user_inventory
+                WHERE user_id = {param_style}
+            """, (call.from_user.id,))
+            
+            items = cur.fetchall()
+            
+            if not items:
+                text = "🎒 Your inventory is empty!\n\nPurchase items from /powerups"
+            else:
+                text = "🎒 YOUR INVENTORY\n" + "═" * 40 + "\n\n"
+                
+                for item in items:
+                    item_type = item['item_type']
+                    item_id = item['item_id']
+                    quantity = item['quantity']
+                    
+                    if item_type == 'powerup' and item_id in PowerUp.POWERUPS:
+                        powerup = PowerUp.POWERUPS[item_id]
+                        text += f"{powerup['name']} x{quantity}\n"
+            
+            bot.send_message(call.message.chat.id, text)
+            bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing inventory: {e}")
+        bot.answer_callback_query(call.id, "Error loading inventory")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('claim_'))
+@rate_limit_check('callback')
+def handle_challenge_claim_callback(call):
+    """Claim challenge rewards"""
+    try:
+        challenge_id = int(call.data.replace('claim_', ''))
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Check if challenge is completed and not claimed
+            cur.execute(f"""
+                SELECT uc.completed, uc.claimed, dc.reward_coins, dc.reward_xp, dc.description
+                FROM user_challenges uc
+                JOIN daily_challenges dc ON uc.challenge_id = dc.id
+                WHERE uc.user_id = {param_style} AND uc.challenge_id = {param_style}
+            """, (call.from_user.id, challenge_id))
+            
+            challenge = cur.fetchone()
+            
+            if not challenge:
+                bot.answer_callback_query(call.id, "Challenge not found!", show_alert=True)
+                return
+            
+            if not challenge['completed']:
+                bot.answer_callback_query(call.id, "Challenge not completed yet!", show_alert=True)
+                return
+            
+            if challenge['claimed']:
+                bot.answer_callback_query(call.id, "Already claimed!", show_alert=True)
+                return
+            
+            # Award rewards
+            _award_coins(call.from_user.id, challenge['reward_coins'])
+            _award_xp(call.from_user.id, challenge['reward_xp'])
+            
+            # Mark as claimed
+            if is_postgres:
+                cur.execute("""
+                    UPDATE user_challenges SET claimed = TRUE
+                    WHERE user_id = %s AND challenge_id = %s
+                """, (call.from_user.id, challenge_id))
+            else:
+                cur.execute("""
+                    UPDATE user_challenges SET claimed = 1
+                    WHERE user_id = ? AND challenge_id = ?
+                """, (call.from_user.id, challenge_id))
+            
+            reward_text = (
+                f"🎁 REWARD CLAIMED!\n\n"
+                f"Challenge: {challenge['description']}\n"
+                f"💰 Coins: +{challenge['reward_coins']}\n"
+                f"📈 XP: +{challenge['reward_xp']}"
+            )
+            
+            bot.answer_callback_query(call.id, reward_text, show_alert=True)
+            
+            # Refresh challenges view
+            tracker = ChallengeTracker(call.from_user.id)
+            message = "📋 DAILY CHALLENGES\n" + "═" * 40 + "\n\n"
+            
+            for ch in tracker.active_challenges:
+                progress = tracker.progress.get(ch['id'], 0)
+                target = ch['target']
+                completed = ch.get('completed', False)
+                claimed = ch.get('claimed', False) or (ch['id'] == challenge_id)
+                
+                if completed and claimed:
+                    status = "✅ CLAIMED"
+                elif completed:
+                    status = "🎁 READY TO CLAIM"
+                else:
+                    status = f"📊 {progress}/{target}"
+                
+                message += (
+                    f"{ch.get('icon', '🎯')} {ch['description']}\n"
+                    f"   Status: {status}\n"
+                    f"   Reward: {ch['reward_coins']} coins | {ch['reward_xp']} XP\n\n"
+                )
+            
+            bot.edit_message_text(
+                message,
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=kb_challenges()
+            )
+            
+    except Exception as e:
+        logger.error(f"Error claiming challenge: {e}")
+        bot.answer_callback_query(call.id, "Error claiming reward")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'detailed_stats')
+@rate_limit_check('callback')
+def handle_detailed_stats_callback(call):
+    """Show detailed match statistics"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get recent matches
+            cur.execute(f"""
+                SELECT * FROM match_history
+                WHERE user_id = {param_style}
+                ORDER BY created_at DESC
+                LIMIT 5
+            """, (call.from_user.id,))
+            
+            recent_matches = cur.fetchall()
+            
+            if not recent_matches:
+                bot.answer_callback_query(call.id, "No match history found!")
+                return
+            
+            stats_text = (
+                "📊 DETAILED STATISTICS\n"
+                f"{'═'*40}\n\n"
+                "📈 RECENT MATCHES (Last 5)\n"
+                f"{'─'*40}\n"
+            )
+            
+            for i, match in enumerate(recent_matches, 1):
+                result_emoji = "✅" if match['result'] == 'win' else "❌" if match['result'] == 'loss' else "🤝"
+                stats_text += (
+                    f"{i}. {result_emoji} {match['match_format']} - "
+                    f"{match['player_score']}/{match['player_wickets']} "
+                    f"vs {match['bot_score']}/{match['bot_wickets']}\n"
+                )
+            
+            # Calculate recent performance
+            wins = sum(1 for m in recent_matches if m['result'] == 'win')
+            avg_score = sum(m['player_score'] for m in recent_matches) / len(recent_matches)
+            
+            stats_text += (
+                f"\n{'─'*40}\n"
+                f"Recent Form: {wins}/5 wins\n"
+                f"Avg Score: {avg_score:.1f}\n"
+            )
+            
+            bot.send_message(call.message.chat.id, stats_text)
+            bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing detailed stats: {e}")
+        bot.answer_callback_query(call.id, "Error loading stats")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('bowl_'))
+@rate_limit_check('callback')
+def handle_bowling_selection(call):
+    """Handle bowling delivery selection"""
+    try:
+        bowl_type = call.data.replace('bowl_', '')
+        game = GameState(call.message.chat.id)
+        
+        if game.data.get('batting') != 'bot':
+            bot.answer_callback_query(call.id, "Bot is not batting!")
+            return
+        
+        # Simulate bot's batting response to your bowling
+        difficulty = calculate_dynamic_difficulty(game, {})
+        
+        # Different bowling types have different effectiveness
+        bowling_effectiveness = {
+            'yorker': {'wicket': 0.25, 'dot': 0.45},
+            'bouncer': {'wicket': 0.15, 'boundary': 0.25},
+            'spin': {'wicket': 0.20, 'dot': 0.40},
+            'slower': {'wicket': 0.18, 'dot': 0.50},
+            'fast': {'wicket': 0.12, 'boundary': 0.30},
+            'wide_yorker': {'wicket': 0.22, 'dot': 0.38}
+        }
+        
+        effectiveness = bowling_effectiveness.get(bowl_type, {'wicket': 0.15, 'dot': 0.40})
+        
+        # Check for power-ups
+        powerup_effects = PowerUp.check_powerup_effects(game, 'bowling')
+        wicket_bonus = powerup_effects.get('wicket_bonus', 0)
+        
+        wicket_chance = effectiveness.get('wicket', 0.15) + wicket_bonus
+        
+        rand = random.random()
+        
+        if rand < wicket_chance:
+            # Wicket!
+            game.data['bot_wkts'] += 1
+            game.data['bot_balls_faced'] += 1
+            game.data['balls_in_over'] += 1
+            
+            commentary = f"🎯 WICKET! Excellent {bowl_type}!"
+            runs = 0
+            
+        elif rand < wicket_chance + effectiveness.get('dot', 0.40):
+            # Dot ball
+            game.data['bot_balls_faced'] += 1
+            game.data['balls_in_over'] += 1
+            
+            commentary = f"Good {bowl_type} - dot ball"
+            runs = 0
+            
+        else:
+            # Runs scored by bot
+            boundary_chance = effectiveness.get('boundary', 0.20)
+            
+            if rand < wicket_chance + effectiveness.get('dot', 0.40) + boundary_chance:
+                # Boundary
+                runs = 6 if random.random() < 0.4 else 4
+                if runs == 6:
+                    game.data['bot_sixes'] += 1
+                else:
+                    game.data['bot_fours'] += 1
+                commentary = f"💥 The bot hits a {runs}! Punished!"
+            else:
+                # Singles/twos
+                runs = random.choice([1, 1, 2])
+                commentary = f"Bot takes {runs} run{'s' if runs > 1 else ''}"
+            
+            game.data['bot_score'] += runs
+            game.data['bot_balls_faced'] += 1
+            game.data['balls_in_over'] += 1
+        
+        # Check over completion
+        if game.data['balls_in_over'] >= 6:
+            game.data['balls_in_over'] = 0
+            game.data['overs_bowled'] += 1
+            PowerUp.update_powerup_durations(game)
+            commentary += "\n⚪ Over complete!"
+        
+        game.save()
+        
+        # Check if innings should end
+        innings_check = check_innings_end(game)
+        if innings_check['innings_end']:
+            if game.data.get('innings') == 1:
+                handle_innings_break(call.message.chat.id, game, innings_check['reason'])
+            else:
+                handle_match_completion(call.message.chat.id, call.from_user.id, game)
+            bot.answer_callback_query(call.id)
+            return
+        
+        # Show update
+        scorecard = generate_live_scorecard(game)
+        bot.answer_callback_query(call.id, commentary[:200])
+        
+        bot.send_message(
+            call.message.chat.id,
+            f"{commentary}\n\n<pre>{scorecard}</pre>",
+            parse_mode="HTML",
+            reply_markup=kb_match_actions(game)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling bowling: {e}")
+        bot.answer_callback_query(call.id, "Error processing delivery")
+
+
+def handle_innings_break(chat_id: int, game: GameState, reason: str):
+    """Handle the break between innings"""
+    try:
+        first_innings_score = game.data.get('player_score' if game.data.get('batting') == 'player' else 'bot_score', 0)
+        target = first_innings_score + 1
+        
+        game.data['innings'] = 2
+        game.data['target'] = target
+        game.data['overs_bowled'] = 0
+        game.data['balls_in_over'] = 0
+        
+        # Switch batting
+        game.data['batting'] = 'bot' if game.data.get('batting') == 'player' else 'player'
+        
+        game.save()
+        
+        innings_break_msg = (
+            f"{'═'*50}\n"
+            f"  INNINGS BREAK\n"
+            f"{'═'*50}\n\n"
+            f"First Innings Complete!\n"
+            f"Score: {first_innings_score}\n\n"
+            f"{'─'*50}\n"
+            f"🎯 TARGET: {target} runs\n"
+            f"{'─'*50}\n\n"
+            f"Second innings about to begin...\n"
+        )
+        
+        if game.data.get('batting') == 'player':
+            innings_break_msg += "\n🏏 YOUR TURN TO BAT!\nChase down the target!"
+        else:
+            innings_break_msg += "\n🎳 YOUR TURN TO BOWL!\nDefend the target!"
+        
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("▶️ Start 2nd Innings", callback_data="start_second_innings"))
+        
+        bot.send_message(chat_id, innings_break_msg, reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error handling innings break: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'start_second_innings')
+@rate_limit_check('callback')
+def handle_start_second_innings(call):
+    """Start the second innings"""
+    try:
+        game = GameState(call.message.chat.id)
+        
+        scorecard = generate_live_scorecard(game)
+        
+        msg = (
+            "🏏 SECOND INNINGS UNDERWAY!\n\n"
+            f"<pre>{scorecard}</pre>"
+        )
+        
+        bot.edit_message_text(
+            msg,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=kb_match_actions(game)
+        )
+        
+        bot.answer_callback_query(call.id, "Second innings started!")
+        
+    except Exception as e:
+        logger.error(f"Error starting second innings: {e}")
+        bot.answer_callback_query(call.id, "Error starting innings")
+
+
+
 @bot.message_handler(func=lambda message: True)
 def handle_other_messages(message):
     try:
@@ -4520,6 +6514,319 @@ def handle_other_messages(message):
         bot.reply_to(message, "I didn't understand that. Try /help for available commands.")
     except Exception as e:
         logger.error(f"Error in default handler: {e}", exc_info=True)
+
+
+def ensure_user_exists(user_id: int, username: str = None, first_name: str = None):
+    """Ensure user exists in database"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            cur.execute(f"SELECT user_id FROM users WHERE user_id = {param_style}", (user_id,))
+            
+            if not cur.fetchone():
+                now = datetime.now(timezone.utc).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO users (user_id, username, first_name, coins, created_at, last_active)
+                        VALUES (%s, %s, %s, 100, %s, %s)
+                    """, (user_id, username, first_name, now, now))
+                else:
+                    cur.execute("""
+                        INSERT INTO users (user_id, username, first_name, coins, created_at, last_active)
+                        VALUES (?, ?, ?, 100, ?, ?)
+                    """, (user_id, username, first_name, now, now))
+                
+                # Create stats entry
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO stats (user_id, created_at, updated_at)
+                        VALUES (%s, %s, %s)
+                    """, (user_id, now, now))
+                else:
+                    cur.execute("""
+                        INSERT INTO stats (user_id, created_at, updated_at)
+                        VALUES (?, ?, ?)
+                    """, (user_id, now, now))
+                
+                # Create level entry
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO user_levels (user_id, level, experience, next_level_xp, total_xp)
+                        VALUES (%s, 1, 0, 100, 0)
+                    """, (user_id,))
+                else:
+                    cur.execute("""
+                        INSERT INTO user_levels (user_id, level, experience, next_level_xp, total_xp)
+                        VALUES (?, 1, 0, 100, 0)
+                    """, (user_id,))
+                
+                logger.info(f"Created new user: {user_id}")
+    except Exception as e:
+        logger.error(f"Error ensuring user exists: {e}")
+
+
+def save_match_to_history(chat_id: int, user_id: int, game: GameState, result: str, margin: str):
+    """Save completed match to history"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            now = datetime.now(timezone.utc).isoformat()
+            
+            overs_played = game.data.get('overs_bowled', 0) + (game.data.get('balls_in_over', 0) / 6.0)
+            player_sr = 0
+            if game.data.get('player_balls_faced', 0) > 0:
+                player_sr = (game.data['player_score'] / game.data['player_balls_faced']) * 100
+            
+            duration = 5  # Estimate - you can track actual time if needed
+            
+            if is_postgres:
+                cur.execute("""
+                    INSERT INTO match_history (
+                        chat_id, user_id, match_format, player_score, bot_score,
+                        player_wickets, bot_wickets, overs_played, result, margin,
+                        player_strike_rate, match_duration_minutes, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    chat_id, user_id, game.data.get('match_format', 'T2'),
+                    game.data.get('player_score', 0), game.data.get('bot_score', 0),
+                    game.data.get('player_wkts', 0), game.data.get('bot_wkts', 0),
+                    overs_played, result, margin, player_sr, duration, now
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO match_history (
+                        chat_id, user_id, match_format, player_score, bot_score,
+                        player_wickets, bot_wickets, overs_played, result, margin,
+                        player_strike_rate, match_duration_minutes, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    chat_id, user_id, game.data.get('match_format', 'T2'),
+                    game.data.get('player_score', 0), game.data.get('bot_score', 0),
+                    game.data.get('player_wkts', 0), game.data.get('bot_wkts', 0),
+                    overs_played, result, margin, player_sr, duration, now
+                ))
+    except Exception as e:
+        logger.error(f"Error saving match to history: {e}")
+
+
+def update_user_stats_after_match(user_id: int, game: GameState, result: str):
+    """Update user statistics after match completion"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get current stats
+            cur.execute(f"SELECT * FROM stats WHERE user_id = {param_style}", (user_id,))
+            stats = cur.fetchone()
+            
+            if not stats:
+                return
+            
+            # Calculate new stats
+            games_played = stats['games_played'] + 1
+            wins = stats['wins'] + (1 if result == 'win' else 0)
+            losses = stats['losses'] + (1 if result == 'loss' else 0)
+            ties = stats['ties'] + (1 if result == 'tie' else 0)
+            
+            player_score = game.data.get('player_score', 0)
+            total_runs = stats['total_runs'] + player_score
+            total_balls = stats['total_balls_faced'] + game.data.get('player_balls_faced', 0)
+            
+            high_score = max(stats['high_score'], player_score)
+            avg_score = total_runs / games_played if games_played > 0 else 0
+            strike_rate = (total_runs / total_balls * 100) if total_balls > 0 else 0
+            
+            sixes = stats['sixes_hit'] + game.data.get('player_sixes', 0)
+            fours = stats['fours_hit'] + game.data.get('player_fours', 0)
+            
+            centuries = stats['centuries'] + (1 if player_score >= 100 else 0)
+            fifties = stats['fifties'] + (1 if 50 <= player_score < 100 else 0)
+            ducks = stats['ducks'] + (1 if player_score == 0 and game.data.get('player_wkts', 0) > 0 else 0)
+            
+            # Update streak
+            if result == 'win':
+                current_streak = stats['current_winning_streak'] + 1
+                longest_streak = max(stats['longest_winning_streak'], current_streak)
+            else:
+                current_streak = 0
+                longest_streak = stats['longest_winning_streak']
+            
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Update database
+            if is_postgres:
+                cur.execute("""
+                    UPDATE stats SET
+                        games_played = %s, wins = %s, losses = %s, ties = %s,
+                        total_runs = %s, total_balls_faced = %s, high_score = %s,
+                        avg_score = %s, strike_rate = %s, sixes_hit = %s, fours_hit = %s,
+                        centuries = %s, fifties = %s, ducks = %s,
+                        current_winning_streak = %s, longest_winning_streak = %s,
+                        updated_at = %s
+                    WHERE user_id = %s
+                """, (
+                    games_played, wins, losses, ties, total_runs, total_balls,
+                    high_score, avg_score, strike_rate, sixes, fours,
+                    centuries, fifties, ducks, current_streak, longest_streak,
+                    now, user_id
+                ))
+            else:
+                cur.execute("""
+                    UPDATE stats SET
+                        games_played = ?, wins = ?, losses = ?, ties = ?,
+                        total_runs = ?, total_balls_faced = ?, high_score = ?,
+                        avg_score = ?, strike_rate = ?, sixes_hit = ?, fours_hit = ?,
+                        centuries = ?, fifties = ?, ducks = ?,
+                        current_winning_streak = ?, longest_winning_streak = ?,
+                        updated_at = ?
+                    WHERE user_id = ?
+                """, (
+                    games_played, wins, losses, ties, total_runs, total_balls,
+                    high_score, avg_score, strike_rate, sixes, fours,
+                    centuries, fifties, ducks, current_streak, longest_streak,
+                    now, user_id
+                ))
+            
+            # Update leaderboards
+            update_leaderboard(user_id, 'highest_score', high_score)
+            update_leaderboard(user_id, 'most_wins', wins)
+            update_leaderboard(user_id, 'win_streak', longest_streak)
+            update_leaderboard(user_id, 'most_sixes', sixes)
+            
+    except Exception as e:
+        logger.error(f"Error updating user stats: {e}")
+
+
+def handle_match_completion(chat_id: int, user_id: int, game: GameState):
+    """Handle all post-match operations"""
+    try:
+        # Determine result
+        player_score = game.data.get('player_score', 0)
+        bot_score = game.data.get('bot_score', 0)
+        
+        if player_score > bot_score:
+            result = 'win'
+            margin = f"{player_score - bot_score} runs"
+            coins_reward = 50
+            result_text = f"🏆 YOU WON by {margin}!"
+        elif bot_score > player_score:
+            result = 'loss'
+            wickets_remaining = game.data.get('wickets_limit', 1) - game.data.get('bot_wkts', 0)
+            margin = f"{wickets_remaining} wickets"
+            coins_reward = 10
+            result_text = f"💔 YOU LOST by {margin}"
+        else:
+            result = 'tie'
+            margin = "Match Tied"
+            coins_reward = 25
+            result_text = "🤝 MATCH TIED!"
+        
+        # Award coins
+        _award_coins(user_id, coins_reward)
+        
+        # Calculate and award XP
+        xp_earned = UserLevelManager.calculate_match_xp(game.data, result)
+        level_update = UserLevelManager.update_user_level(user_id, xp_earned)
+        
+        # Update stats
+        update_user_stats_after_match(user_id, game, result)
+        
+        # Save to history
+        save_match_to_history(chat_id, user_id, game, result, margin)
+        
+        # Check for achievements
+        match_data = {
+            'result': result,
+            'player_score': player_score,
+            'player_sixes': game.data.get('player_sixes', 0),
+            'player_fours': game.data.get('player_fours', 0),
+            'player_balls_faced': game.data.get('player_balls_faced', 0),
+            'player_wkts': game.data.get('player_wkts', 0),
+            'innings': game.data.get('innings', 1),
+            'is_tournament_win': game.data.get('is_tournament_match', False) and result == 'win'
+        }
+        
+        # Get winning streak for achievement check
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            cur.execute(f"SELECT current_winning_streak FROM stats WHERE user_id = {param_style}", (user_id,))
+            stats_row = cur.fetchone()
+            if stats_row:
+                match_data['winning_streak'] = stats_row['current_winning_streak']
+        
+        unlocked_achievements = AchievementSystem.check_achievements(user_id, match_data)
+        
+        # Update challenges
+        tracker = ChallengeTracker(user_id)
+        if result == 'win':
+            tracker.update_progress(ChallengeType.WINS, 1)
+            tracker.update_progress(ChallengeType.STREAK, 1)
+        else:
+            tracker.update_progress(ChallengeType.STREAK, 0)  # Reset streak
+        
+        tracker.update_progress(ChallengeType.SCORE, player_score)
+        tracker.update_progress(ChallengeType.SIXES, game.data.get('player_sixes', 0))
+        tracker.update_progress(
+            ChallengeType.BOUNDARIES,
+            game.data.get('player_fours', 0) + game.data.get('player_sixes', 0)
+        )
+        
+        completed_challenges = tracker.check_completion()
+        
+        # Build match summary
+        summary = (
+            f"{'═'*50}\n"
+            f"  MATCH SUMMARY\n"
+            f"{'═'*50}\n\n"
+            f"{result_text}\n\n"
+            f"🏏 YOUR SCORE: {player_score}/{game.data.get('player_wkts', 0)}\n"
+            f"🤖 BOT SCORE: {bot_score}/{game.data.get('bot_wkts', 0)}\n\n"
+            f"{'─'*50}\n"
+            f"💰 Coins Earned: +{coins_reward}\n"
+            f"📈 XP Earned: +{xp_earned}\n"
+        )
+        
+        if level_update.get('level_up'):
+            summary += f"\n🎉 LEVEL UP! You're now Level {level_update['new_level']}!\n"
+            
+            for reward in level_update.get('rewards', []):
+                summary += f"🎁 Bonus: {reward['coins']} coins + Title: {reward['title']}\n"
+        
+        if unlocked_achievements:
+            summary += f"\n{'🏆'*15}\n"
+            for achievement_id in unlocked_achievements:
+                achievement = AchievementSystem.ACHIEVEMENTS[achievement_id]
+                summary += f"🏆 ACHIEVEMENT UNLOCKED: {achievement['name']}!\n"
+        
+        if completed_challenges:
+            summary += f"\n{'📋'*15}\n"
+            summary += "✅ Challenges Completed:\n"
+            for challenge in completed_challenges:
+                summary += f"  • {challenge['description']}\n"
+        
+        summary += f"\n{'═'*50}"
+        
+        # Send summary with post-match options
+        bot.send_message(
+            chat_id,
+            summary,
+            reply_markup=kb_post_match({'result': result})
+        )
+        
+        # Clean up game
+        game.delete()
+        
+    except Exception as e:
+        logger.error(f"Error handling match completion: {e}")
 
 
 def handle_toss_result(chat_id: int, user_choice: str, user_id: int):
@@ -5065,34 +7372,72 @@ start_time = time.time()
 
 
 if __name__ == "__main__":
-    logger.info("=" * 50)
-    logger.info("CRICKET BOT STARTING (WEBHOOK MODE)")
-    logger.info("=" * 50)
-
-    # 1. Validate environment
-    validate_environment()
-    
-    # 2. Initialize database
     try:
-        logger.info("Initializing database...")
+        logger.info("=== CRICKET BOT STARTING ===")
+        
+        # Validate environment
+        validate_environment()
+        
+        # Initialize database
         db_init()
-        logger.info("✓ Database initialized")
-    except Exception as e:
-        logger.error(f"✗ Database init failed: {e}")
-        sys.exit(1)
-    
-    # 3. Setup webhook
-    if USE_WEBHOOK:
-        logger.info("Setting up webhook...")
-        if setup_webhook():
-            logger.info("✓ Webhook configured successfully")
+        
+        # Create daily challenges
+        create_daily_challenges()
+        
+        # Schedule daily tasks
+        def run_scheduled_tasks():
+            schedule.every().day.at("00:00").do(create_daily_challenges)
+            
+            while True:
+                schedule.run_pending()
+                time.sleep(60)
+        
+        # Start scheduler in background thread
+        scheduler_thread = threading.Thread(target=run_scheduled_tasks, daemon=True)
+        scheduler_thread.start()
+        logger.info("Scheduled tasks started")
+        
+        if USE_WEBHOOK:
+            # Webhook mode
+            app = Flask(__name__)
+            
+            @app.route('/' + TOKEN, methods=['POST'])
+            def webhook():
+                json_string = request.get_data().decode('utf-8')
+                update = telebot.types.Update.de_json(json_string)
+                bot.process_new_updates([update])
+                return '', 200
+            
+            @app.route('/health', methods=['GET'])
+            def health():
+                return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+            
+            @app.route('/')
+            def index():
+                return "Cricket Bot is running!"
+            
+            # Set webhook
+            bot.remove_webhook()
+            time.sleep(1)
+            webhook_url_full = f"{WEBHOOK_URL}/{TOKEN}"
+            bot.set_webhook(url=webhook_url_full)
+            logger.info(f"Webhook set to: {webhook_url_full}")
+            
+            # Run Flask app
+            app.run(host='0.0.0.0', port=PORT, debug=False)
         else:
-            logger.error("✗ Webhook setup failed")
-            sys.exit(1)
-    
-    # 4. Start Flask app (gunicorn will handle this on Render)
-    logger.info("Bot is ready to receive updates")
-    logger.info(f"Visit your-app.onrender.com/verify-bot to check status")
+            # Polling mode
+            logger.info("Starting bot in polling mode...")
+            logger.info("Bot is ready to receive messages!")
+            bot.remove_webhook()
+            time.sleep(1)
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 # === FINAL INITIALIZATION (MUST BE AT END) ===

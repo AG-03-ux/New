@@ -672,6 +672,7 @@ def db_init():
         # Create schema version table and run migrations
         create_schema_version_table()
         create_additional_tables()
+        create_anticheat_tables()
         migrate_database()
         
         logger.info("=== MIGRATIONS COMPLETED ===")
@@ -680,6 +681,537 @@ def db_init():
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
+
+
+import hashlib
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Tuple
+
+class AntiCheatSystem:
+    """Comprehensive anti-cheat detection and prevention system"""
+    
+    # Thresholds for suspicious behavior
+    THRESHOLDS = {
+        'max_games_per_hour': 30,  # More than 30 games/hour is suspicious
+        'max_wins_streak': 50,  # 50+ win streak needs review
+        'impossible_score_rate': 300,  # 300+ runs in T2 is suspicious
+        'similar_device_window': 3600,  # 1 hour window for device fingerprint check
+        'max_accounts_per_device': 2,  # Max 2 accounts per device fingerprint
+        'inhuman_reaction_time': 0.1,  # < 100ms response is bot-like
+        'perfect_game_threshold': 5,  # 5 perfect games in a row is suspicious
+        'stat_manipulation_threshold': 0.95  # 95% win rate is suspicious
+    }
+    
+    # Ban durations in hours
+    BAN_DURATIONS = {
+        'warning': 0,  # Just a warning
+        'temporary': 24,  # 24 hours
+        'extended': 168,  # 7 days
+        'permanent': 999999  # Permanent ban
+    }
+    
+    @staticmethod
+    def create_device_fingerprint(message) -> str:
+        """Create a unique device fingerprint from user data"""
+        # Combine various user/device attributes
+        fingerprint_data = []
+        
+        if hasattr(message, 'from_user'):
+            user = message.from_user
+            # Use language code, is_bot status
+            fingerprint_data.append(str(user.language_code or ''))
+            fingerprint_data.append(str(user.is_bot))
+        
+        if hasattr(message, 'chat'):
+            chat = message.chat
+            fingerprint_data.append(str(chat.type))
+        
+        # Create hash from combined data
+        fingerprint_str = '|'.join(fingerprint_data)
+        return hashlib.md5(fingerprint_str.encode()).hexdigest()
+    
+    @staticmethod
+    def check_user_behavior(user_id: int) -> Dict[str, any]:
+        """
+        Comprehensive behavior analysis for cheating detection
+        Returns: dict with 'suspicious', 'violations', 'risk_score'
+        """
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                violations = []
+                risk_score = 0
+                
+                # Check 1: Games per hour
+                one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+                cur.execute(f"""
+                    SELECT COUNT(*) as count FROM match_history 
+                    WHERE user_id = {param_style} AND created_at > {param_style}
+                """, (user_id, one_hour_ago))
+                games_last_hour = cur.fetchone()['count']
+                
+                if games_last_hour > AntiCheatSystem.THRESHOLDS['max_games_per_hour']:
+                    violations.append({
+                        'type': 'excessive_games',
+                        'severity': 'high',
+                        'details': f'{games_last_hour} games in last hour'
+                    })
+                    risk_score += 30
+                
+                # Check 2: Impossible statistics
+                cur.execute(f"""
+                    SELECT * FROM stats WHERE user_id = {param_style}
+                """, (user_id,))
+                stats = cur.fetchone()
+                
+                if stats:
+                    games_played = stats.get('games_played', 0)
+                    wins = stats.get('wins', 0)
+                    
+                    if games_played > 10:  # Only check if sufficient games
+                        win_rate = wins / games_played if games_played > 0 else 0
+                        
+                        # Unnaturally high win rate
+                        if win_rate > AntiCheatSystem.THRESHOLDS['stat_manipulation_threshold']:
+                            violations.append({
+                                'type': 'impossible_win_rate',
+                                'severity': 'critical',
+                                'details': f'{win_rate*100:.1f}% win rate'
+                            })
+                            risk_score += 50
+                        
+                        # Check current win streak
+                        current_streak = stats.get('current_winning_streak', 0)
+                        if current_streak > AntiCheatSystem.THRESHOLDS['max_wins_streak']:
+                            violations.append({
+                                'type': 'impossible_streak',
+                                'severity': 'high',
+                                'details': f'{current_streak} game win streak'
+                            })
+                            risk_score += 40
+                
+                # Check 3: Multiple accounts from same device
+                device_check = AntiCheatSystem._check_device_fingerprint(user_id)
+                if device_check['multiple_accounts']:
+                    violations.append({
+                        'type': 'multiple_accounts',
+                        'severity': 'critical',
+                        'details': f"{device_check['account_count']} accounts on same device"
+                    })
+                    risk_score += 60
+                
+                # Check 4: Inhuman reaction times
+                reaction_check = AntiCheatSystem._check_reaction_times(user_id)
+                if reaction_check['bot_like_behavior']:
+                    violations.append({
+                        'type': 'bot_behavior',
+                        'severity': 'critical',
+                        'details': f"Avg reaction: {reaction_check['avg_reaction']:.3f}s"
+                    })
+                    risk_score += 70
+                
+                # Check 5: Impossible scores
+                cur.execute(f"""
+                    SELECT player_score, match_format, overs_played 
+                    FROM match_history 
+                    WHERE user_id = {param_style} 
+                    ORDER BY created_at DESC LIMIT 10
+                """, (user_id,))
+                recent_matches = cur.fetchall()
+                
+                for match in recent_matches:
+                    score = match.get('player_score', 0)
+                    format_str = match.get('match_format', 'T2')
+                    overs = int(format_str.replace('T', ''))
+                    
+                    # Maximum realistic score: ~18 runs per over
+                    max_realistic = overs * 18
+                    if score > max_realistic * 1.5:  # 50% tolerance
+                        violations.append({
+                            'type': 'impossible_score',
+                            'severity': 'high',
+                            'details': f'{score} runs in {format_str}'
+                        })
+                        risk_score += 35
+                        break  # Only report once
+                
+                return {
+                    'suspicious': risk_score >= 50,
+                    'violations': violations,
+                    'risk_score': min(risk_score, 100),  # Cap at 100
+                    'user_id': user_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Error checking user behavior: {e}")
+            return {'suspicious': False, 'violations': [], 'risk_score': 0}
+    
+    @staticmethod
+    def _check_device_fingerprint(user_id: int) -> Dict:
+        """Check if multiple accounts using same device"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                # Get user's device fingerprint
+                cur.execute(f"""
+                    SELECT device_fingerprint FROM user_devices 
+                    WHERE user_id = {param_style}
+                """, (user_id,))
+                
+                result = cur.fetchone()
+                if not result:
+                    return {'multiple_accounts': False, 'account_count': 1}
+                
+                fingerprint = result['device_fingerprint']
+                
+                # Check how many accounts use this fingerprint
+                cur.execute(f"""
+                    SELECT COUNT(DISTINCT user_id) as count 
+                    FROM user_devices 
+                    WHERE device_fingerprint = {param_style}
+                """, (fingerprint,))
+                
+                count = cur.fetchone()['count']
+                
+                return {
+                    'multiple_accounts': count > AntiCheatSystem.THRESHOLDS['max_accounts_per_device'],
+                    'account_count': count
+                }
+        except Exception as e:
+            logger.error(f"Error checking device fingerprint: {e}")
+            return {'multiple_accounts': False, 'account_count': 1}
+    
+    @staticmethod
+    def _check_reaction_times(user_id: int) -> Dict:
+        """Check for bot-like inhuman reaction times"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                # Get recent reaction times
+                cur.execute(f"""
+                    SELECT reaction_time FROM user_actions 
+                    WHERE user_id = {param_style} 
+                    ORDER BY created_at DESC LIMIT 50
+                """, (user_id,))
+                
+                reaction_times = [row['reaction_time'] for row in cur.fetchall()]
+                
+                if not reaction_times:
+                    return {'bot_like_behavior': False, 'avg_reaction': 1.0}
+                
+                avg_reaction = sum(reaction_times) / len(reaction_times)
+                
+                # Too fast = bot, too consistent = bot
+                too_fast = avg_reaction < AntiCheatSystem.THRESHOLDS['inhuman_reaction_time']
+                too_consistent = len(set(reaction_times)) < len(reaction_times) * 0.3
+                
+                return {
+                    'bot_like_behavior': too_fast or too_consistent,
+                    'avg_reaction': avg_reaction
+                }
+        except Exception as e:
+            logger.error(f"Error checking reaction times: {e}")
+            return {'bot_like_behavior': False, 'avg_reaction': 1.0}
+    
+    @staticmethod
+    def ban_user(user_id: int, reason: str, duration_type: str = 'temporary', 
+                 banned_by: int = None) -> bool:
+        """Ban a user for cheating"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                duration_hours = AntiCheatSystem.BAN_DURATIONS.get(duration_type, 24)
+                banned_until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+                now = datetime.now(timezone.utc).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO user_bans 
+                        (user_id, reason, banned_at, banned_until, banned_by, ban_type)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (user_id, reason, now, banned_until.isoformat(), banned_by, duration_type))
+                else:
+                    cur.execute("""
+                        INSERT INTO user_bans 
+                        (user_id, reason, banned_at, banned_until, banned_by, ban_type)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (user_id, reason, now, banned_until.isoformat(), banned_by, duration_type))
+                
+                # Log the ban
+                logger.warning(f"User {user_id} banned: {reason} (type: {duration_type})")
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error banning user: {e}")
+            return False
+    
+    @staticmethod
+    def is_user_banned(user_id: int) -> Tuple[bool, Dict]:
+        """Check if user is currently banned"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                param_style = "%s" if is_postgres else "?"
+                
+                now = datetime.now(timezone.utc).isoformat()
+                
+                cur.execute(f"""
+                    SELECT * FROM user_bans 
+                    WHERE user_id = {param_style} 
+                    AND banned_until > {param_style}
+                    ORDER BY banned_at DESC LIMIT 1
+                """, (user_id, now))
+                
+                ban = cur.fetchone()
+                
+                if ban:
+                    return True, {
+                        'reason': ban['reason'],
+                        'banned_until': ban['banned_until'],
+                        'ban_type': ban['ban_type']
+                    }
+                
+                return False, {}
+        except Exception as e:
+            logger.error(f"Error checking ban status: {e}")
+            return False, {}
+    
+    @staticmethod
+    def log_user_action(user_id: int, action_type: str, reaction_time: float = None):
+        """Log user actions for behavior analysis"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                now = datetime.now(timezone.utc).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO user_actions 
+                        (user_id, action_type, reaction_time, created_at)
+                        VALUES (%s, %s, %s, %s)
+                    """, (user_id, action_type, reaction_time, now))
+                else:
+                    cur.execute("""
+                        INSERT INTO user_actions 
+                        (user_id, action_type, reaction_time, created_at)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, action_type, reaction_time, now))
+        except Exception as e:
+            logger.error(f"Error logging user action: {e}")
+    
+    @staticmethod
+    def record_device_fingerprint(user_id: int, fingerprint: str):
+        """Store device fingerprint for multi-account detection"""
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                now = datetime.now(timezone.utc).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO user_devices 
+                        (user_id, device_fingerprint, first_seen, last_seen)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (user_id, device_fingerprint) 
+                        DO UPDATE SET last_seen = EXCLUDED.last_seen
+                    """, (user_id, fingerprint, now, now))
+                else:
+                    cur.execute("""
+                        INSERT OR REPLACE INTO user_devices 
+                        (user_id, device_fingerprint, first_seen, last_seen)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, fingerprint, now, now))
+        except Exception as e:
+            logger.error(f"Error recording device fingerprint: {e}")
+
+
+# Database tables needed for anti-cheat (add to create_additional_tables function)
+def create_anticheat_tables():
+    """Create tables for anti-cheat system"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                autoincrement = "SERIAL PRIMARY KEY"
+                bigint = "BIGINT"
+                text_type = "TEXT"
+                real_type = "REAL"
+                timestamp_type = "TIMESTAMPTZ"
+            else:
+                autoincrement = "INTEGER PRIMARY KEY AUTOINCREMENT"
+                bigint = "INTEGER"
+                text_type = "TEXT"
+                real_type = "REAL"
+                timestamp_type = "TEXT"
+            
+            # User bans table
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_bans (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    reason {text_type} NOT NULL,
+                    banned_at {timestamp_type} NOT NULL,
+                    banned_until {timestamp_type} NOT NULL,
+                    banned_by {bigint},
+                    ban_type {text_type} DEFAULT 'temporary'
+                )
+            """)
+            
+            # User devices for fingerprinting
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_devices (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    device_fingerprint {text_type} NOT NULL,
+                    first_seen {timestamp_type} NOT NULL,
+                    last_seen {timestamp_type} NOT NULL,
+                    UNIQUE(user_id, device_fingerprint)
+                )
+            """)
+            
+            # User actions log
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_actions (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    action_type {text_type} NOT NULL,
+                    reaction_time {real_type},
+                    created_at {timestamp_type} NOT NULL
+                )
+            """)
+            
+            # Anti-cheat reports
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS anticheat_reports (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    violation_type {text_type} NOT NULL,
+                    severity {text_type} NOT NULL,
+                    details {text_type},
+                    risk_score INTEGER DEFAULT 0,
+                    action_taken {text_type},
+                    created_at {timestamp_type} NOT NULL
+                )
+            """)
+            
+            logger.info("Anti-cheat tables created successfully")
+            
+    except Exception as e:
+        logger.error(f"Error creating anti-cheat tables: {e}")
+        raise
+
+
+# Decorator to check for bans before command execution
+def check_ban(func):
+    """Decorator to check if user is banned before executing command"""
+    @wraps(func)
+    def wrapper(message, *args, **kwargs):
+        user_id = message.from_user.id
+        is_banned, ban_info = AntiCheatSystem.is_user_banned(user_id)
+        
+        if is_banned:
+            ban_msg = (
+                f"🚫 <b>Account Suspended</b>\n\n"
+                f"Reason: {ban_info.get('reason', 'Violation of rules')}\n"
+                f"Ban Type: {ban_info.get('ban_type', 'temporary').title()}\n"
+                f"Until: {ban_info.get('banned_until', 'Unknown')[:16]}\n\n"
+                f"If you believe this is an error, contact support."
+            )
+            bot.send_message(message.chat.id, ban_msg)
+            return None
+        
+        return func(message, *args, **kwargs)
+    return wrapper
+
+
+# Middleware to track actions and check for cheating
+def anticheat_middleware(func):
+    """Decorator to track user actions and detect cheating"""
+    @wraps(func)
+    def wrapper(message, *args, **kwargs):
+        user_id = message.from_user.id
+        action_start = time.time()
+        
+        # Record device fingerprint
+        fingerprint = AntiCheatSystem.create_device_fingerprint(message)
+        AntiCheatSystem.record_device_fingerprint(user_id, fingerprint)
+        
+        # Execute the function
+        result = func(message, *args, **kwargs)
+        
+        # Calculate reaction time
+        reaction_time = time.time() - action_start
+        AntiCheatSystem.log_user_action(user_id, func.__name__, reaction_time)
+        
+        # Periodic behavior check (every 10th action)
+        if random.random() < 0.1:  # 10% chance
+            behavior = AntiCheatSystem.check_user_behavior(user_id)
+            
+            if behavior['suspicious']:
+                # Log the suspicious activity
+                try:
+                    with get_db_connection() as conn:
+                        cur = conn.cursor()
+                        is_postgres = bool(os.getenv("DATABASE_URL"))
+                        now = datetime.now(timezone.utc).isoformat()
+                        
+                        for violation in behavior['violations']:
+                            if is_postgres:
+                                cur.execute("""
+                                    INSERT INTO anticheat_reports 
+                                    (user_id, violation_type, severity, details, risk_score, created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                """, (user_id, violation['type'], violation['severity'], 
+                                      violation['details'], behavior['risk_score'], now))
+                            else:
+                                cur.execute("""
+                                    INSERT INTO anticheat_reports 
+                                    (user_id, violation_type, severity, details, risk_score, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                """, (user_id, violation['type'], violation['severity'], 
+                                      violation['details'], behavior['risk_score'], now))
+                except Exception as e:
+                    logger.error(f"Error logging anticheat report: {e}")
+                
+                # Auto-ban for critical violations
+                if behavior['risk_score'] >= 80:
+                    AntiCheatSystem.ban_user(
+                        user_id, 
+                        f"Automated ban - Risk score: {behavior['risk_score']}", 
+                        'extended'
+                    )
+                    bot.send_message(
+                        message.chat.id,
+                        "🚫 Your account has been suspended due to suspicious activity. "
+                        "Contact support if you believe this is an error."
+                    )
+                elif behavior['risk_score'] >= 60:
+                    # Warning
+                    bot.send_message(
+                        message.chat.id,
+                        "⚠️ Warning: Suspicious activity detected on your account. "
+                        "Continuing may result in a ban."
+                    )
+        
+        return result
+    return wrapper
 
 
 class PowerUpType(Enum):
@@ -2720,8 +3252,7 @@ def save_tournament_to_db(tournament: EliteTournament, chat_id: int = None):
                     VALUES (%s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
                     brackets = EXCLUDED.brackets, metadata = EXCLUDED.metadata
-                    RETURNING id
-                """, (tournament.name, tournament.type, tournament.theme, 
+                """, (tournament.tournament_id, tournament.name, tournament.type, tournament.theme, 
                       tournament.tournament_state, f"T{tournament.format_overs}",
                       len(tournament.participants), tournament.created_by, now,
                       json.dumps(tournament.bracket), tournament_json))
@@ -4029,26 +4560,27 @@ def check_powerplay_status(g: Dict[str, Any]) -> bool:
         return True
     return False
 
-def check_innings_end(g: Dict[str, Any]) -> bool:
+def check_innings_end(g: Dict[str, Any]) -> dict:
+    """Check if innings should end - returns dict with details"""
     current_batting = g["batting"]
     
     # Check wickets
     if current_batting == "player" and g["player_wkts"] >= g["wickets_limit"]:
-        return True
+        return {'innings_end': True, 'reason': 'all_out'}
     elif current_batting == "bot" and g["bot_wkts"] >= g["wickets_limit"]:
-        return True
+        return {'innings_end': True, 'reason': 'all_out'}
     
     # Check overs
     if g["overs_bowled"] >= g["overs_limit"]:
-        return True
+        return {'innings_end': True, 'reason': 'overs_complete'}
     
     # Check target achieved in second innings
     if g["innings"] == 2 and g["target"]:
         current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
-        if current_score > g["target"]:
-            return True
+        if current_score >= g["target"]:
+            return {'innings_end': True, 'reason': 'target_achieved'}
     
-    return False
+    return {'innings_end': False, 'reason': None}
 
 def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
     """Enhanced version with tournament and challenge integration - REPLACE EXISTING"""
@@ -5179,6 +5711,8 @@ def setup_webhook():
     return False
 # Message handlers
 @bot.message_handler(commands=['start'])
+@check_ban
+@anticheat_middleware
 @rate_limit_check('command')
 def cmd_start(message):
     """Handle /start command"""
@@ -5204,6 +5738,8 @@ def cmd_start(message):
 
 
 @bot.message_handler(commands=['play'])
+@check_ban
+@anticheat_middleware
 def cmd_play(message):
     try:
         logger.info(f"Received /play from user {message.from_user.id}")
@@ -5559,6 +6095,37 @@ def handle_leaderboard_callback(call):
     except Exception as e:
         logger.error(f"Error in leaderboard callback: {e}")
         bot.answer_callback_query(call.id, "Error loading leaderboard")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'tournament_list')
+def handle_tournament_list(call):
+    show_all_tournaments(call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'tournament_rankings')
+def handle_tournament_rankings(call):
+    show_tournament_rankings(call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'tournament_history')
+def handle_tournament_history(call):
+    show_user_tournament_history(call.message.chat.id, call.from_user.id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'challenges_view')
+def handle_challenges_view_callback(call):
+    show_daily_challenges(call.message.chat.id, call.from_user.id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'challenges_claim')
+def handle_challenges_claim_callback(call):
+    claim_challenge_rewards(call.message.chat.id, call.from_user.id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'challenges_history')
+def handle_challenges_history_callback(call):
+    show_challenge_history(call.message.chat.id, call.from_user.id)
+    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_powerup_'))
@@ -6506,6 +7073,24 @@ def handle_start_second_innings(call):
         bot.answer_callback_query(call.id, "Error starting innings")
 
 
+@bot.callback_query_handler(func=lambda call: call.data == 'help')
+def handle_help_callback(call):
+    help_text = (
+        "🏏 <b>HOW TO PLAY</b>\n\n"
+        "1. Start a match with /play\n"
+        "2. Win the toss to choose bat/bowl\n"
+        "3. Send numbers 1-6 for each ball\n"
+        "4. Same number = OUT! Different = RUNS!\n\n"
+        "<b>Commands:</b>\n"
+        "/play - Start match\n"
+        "/stats - View stats\n"
+        "/leaderboard - Rankings\n"
+        "/daily - Daily challenges\n"
+        "/achievements - View achievements"
+    )
+    bot.send_message(call.message.chat.id, help_text)
+    bot.answer_callback_query(call.id)
+
 
 @bot.message_handler(func=lambda message: True)
 def handle_other_messages(message):
@@ -7365,6 +7950,46 @@ def test_bot():
         'bot': 'ok' if bot_ok else 'error',
         'webhook_url': WEBHOOK_URL if USE_WEBHOOK else 'polling'
     }, 200
+
+
+
+@bot.message_handler(commands=['checkuser'])
+def check_user_admin(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    try:
+        user_id = int(message.text.split()[1])
+        behavior = AntiCheatSystem.check_user_behavior(user_id)
+        
+        response = f"🔍 <b>User Analysis: {user_id}</b>\n\n"
+        response += f"Risk Score: {behavior['risk_score']}/100\n"
+        response += f"Suspicious: {'⚠️ YES' if behavior['suspicious'] else '✅ NO'}\n\n"
+        
+        if behavior['violations']:
+            response += "<b>Violations:</b>\n"
+            for v in behavior['violations']:
+                response += f"• {v['type']}: {v['details']} ({v['severity']})\n"
+        
+        bot.send_message(message.chat.id, response)
+    except:
+        bot.send_message(message.chat.id, "Usage: /checkuser <user_id>")
+
+@bot.message_handler(commands=['ban'])
+def ban_user_admin(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    try:
+        parts = message.text.split()
+        user_id = int(parts[1])
+        duration = parts[2] if len(parts) > 2 else 'temporary'
+        reason = ' '.join(parts[3:]) if len(parts) > 3 else 'Admin ban'
+        
+        AntiCheatSystem.ban_user(user_id, reason, duration, message.from_user.id)
+        bot.send_message(message.chat.id, f"✅ User {user_id} banned ({duration})")
+    except:
+        bot.send_message(message.chat.id, "Usage: /ban <user_id> <temporary|extended|permanent> [reason]")
 
 
 import time

@@ -353,6 +353,7 @@ def rate_limit_check(action_type: str = 'default'):
 # Add connection pooling and better error handling
 @contextmanager
 def get_db_connection():
+    """Database connection manager - FIXED VERSION"""
     conn = None
     max_retries = 3
     retry_count = 0
@@ -369,21 +370,40 @@ def get_db_connection():
                 conn = sqlite3.connect(DB_PATH, timeout=30.0)
                 conn.row_factory = sqlite3.Row
             
+            # Yield the connection
             yield conn
-            conn.commit()
+            
+            # Commit on success
+            if conn:
+                try:
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Commit error: {e}")
+                    if conn:
+                        conn.rollback()
             break
             
         except Exception as e:
             retry_count += 1
             if conn:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            
             if retry_count >= max_retries:
                 logger.error(f"Database connection failed after {max_retries} attempts: {e}")
                 raise
+            
             time.sleep(0.5 * retry_count)
+        
         finally:
+            # CRITICAL: Always close the connection
             if conn:
-                conn.close()
+                try:
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Error closing connection: {e}")
 
 
 def create_schema_version_table():
@@ -1526,23 +1546,23 @@ def kb_powerups_shop() -> types.InlineKeyboardMarkup:
 
 
 def handle_powerup_purchase(user_id: int, powerup_id: str) -> dict:
-    """Handle power-up purchase"""
+    """Handle power-up purchase - FIXED VERSION"""
     if powerup_id not in PowerUp.POWERUPS:
         return {'success': False, 'message': 'Invalid power-up'}
     
     powerup = PowerUp.POWERUPS[powerup_id]
     cost = powerup['cost']
     
-    user_coins = _get_user_coins(user_id)
-    
-    if user_coins < cost:
-        return {'success': False, 'message': f'Not enough coins! Need {cost}, have {user_coins}'}
-    
-    # Deduct coins
-    _deduct_user_coins(user_id, cost)
-    
-    # Add to inventory
     try:
+        user_coins = _get_user_coins(user_id)
+        
+        if user_coins < cost:
+            return {'success': False, 'message': f'Not enough coins! Need {cost - user_coins} more'}
+        
+        # Deduct coins
+        _deduct_user_coins(user_id, cost)
+        
+        # Add to inventory
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
@@ -1556,7 +1576,7 @@ def handle_powerup_purchase(user_id: int, powerup_id: str) -> dict:
                     DO UPDATE SET quantity = user_inventory.quantity + 1
                 """, (user_id, powerup_id, now))
             else:
-                # Check if exists
+                # SQLite version
                 cur.execute("""
                     SELECT quantity FROM user_inventory 
                     WHERE user_id = ? AND item_type = 'powerup' AND item_id = ?
@@ -1574,13 +1594,16 @@ def handle_powerup_purchase(user_id: int, powerup_id: str) -> dict:
                         VALUES (?, 'powerup', ?, 1, ?)
                     """, (user_id, powerup_id, now))
         
+        logger.info(f"User {user_id} purchased powerup {powerup_id} for {cost} coins")
+        
         return {
             'success': True,
             'message': f"✅ Purchased {powerup['name']}!\n{powerup['description']}"
         }
+        
     except Exception as e:
-        logger.error(f"Error purchasing power-up: {e}")
-        return {'success': False, 'message': 'Purchase failed'}
+        logger.error(f"Error purchasing power-up: {e}", exc_info=True)
+        return {'success': False, 'message': 'Purchase failed - try again'}
     
 
 class LeaderboardCategory(Enum):
@@ -4336,27 +4359,51 @@ def _get_user_coins(user_id: int) -> int:
         logger.error(f"Error getting user coins: {e}")
         return 0
 
-def _deduct_user_coins(user_id: int, amount: int):
-    """Deduct coins from user"""
+def _deduct_user_coins(user_id: int, amount: int) -> bool:
+    """Deduct coins from user - FIXED VERSION"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
-            param_style = "%s" if is_postgres else "?"
-            cur.execute(f"UPDATE users SET coins = coins - {param_style} WHERE user_id = {param_style}", (amount, user_id))
+            
+            if is_postgres:
+                cur.execute(
+                    "UPDATE users SET coins = coins - %s WHERE user_id = %s",
+                    (amount, user_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE users SET coins = coins - ? WHERE user_id = ?",
+                    (amount, user_id)
+                )
+        
+        return True
     except Exception as e:
-        logger.error(f"Error deducting coins: {e}")
+        logger.error(f"Error deducting coins for user {user_id}: {e}")
+        return False
 
-def _award_coins(user_id: int, amount: int):
-    """Award coins to user"""
+def _award_coins(user_id: int, amount: int) -> bool:
+    """Award coins to user - FIXED VERSION"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
-            param_style = "%s" if is_postgres else "?"
-            cur.execute(f"UPDATE users SET coins = coins + {param_style} WHERE user_id = {param_style}", (amount, user_id))
+            
+            if is_postgres:
+                cur.execute(
+                    "UPDATE users SET coins = coins + %s WHERE user_id = %s",
+                    (amount, user_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                    (amount, user_id)
+                )
+        
+        return True
     except Exception as e:
-        logger.error(f"Error awarding coins: {e}")
+        logger.error(f"Error awarding coins to user {user_id}: {e}")
+        return False
 
 def _award_xp(user_id: int, amount: int):
     """Award XP to user"""

@@ -4776,6 +4776,36 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
     except Exception as e:
         logger.error(f"Error processing ball for chat {chat_id}, user {user_id}: {e}", exc_info=True)
         return "An error occurred while processing your move. Please try again."
+        
+def check_innings_end(g: Dict[str, Any]) -> dict:
+    """Check if innings should end - FINAL FIX"""
+    current_batting = g["batting"]
+    
+    # Check wickets first
+    if current_batting == "player":
+        if g["player_wkts"] >= g["wickets_limit"]:
+            logger.info(f"Innings end: Player all out ({g['player_wkts']}/{g['wickets_limit']})")
+            return {'innings_end': True, 'reason': 'all_out'}
+    else:
+        if g["bot_wkts"] >= g["wickets_limit"]:
+            logger.info(f"Innings end: Bot all out ({g['bot_wkts']}/{g['wickets_limit']})")
+            return {'innings_end': True, 'reason': 'all_out'}
+    
+    # Check overs - MUST complete full over (6 balls)
+    if g["overs_bowled"] >= g["overs_limit"] and g["balls_in_over"] == 0:
+        logger.info(f"Innings end: Overs complete ({g['overs_bowled']}/{g['overs_limit']})")
+        return {'innings_end': True, 'reason': 'overs_complete'}
+    
+    # Check target in second innings
+    if g["innings"] == 2 and g.get("target"):
+        current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
+        logger.info(f"2nd innings check: current={current_score}, target={g['target']}")
+        
+        if current_score >= g["target"]:
+            logger.info(f"Innings end: Target achieved ({current_score} >= {g['target']})")
+            return {'innings_end': True, 'reason': 'target_achieved'}
+    
+    return {'innings_end': False, 'reason': None}
 
 def show_live_score(chat_id: int, g: Dict[str, Any], detailed: bool = True):
     try:
@@ -6106,46 +6136,117 @@ def handle_callback(call):
     try:
         logger.info(f"Received callback: {call.data} from user {call.from_user.id}")
         
-        # ADD ALL THESE MISSING HANDLERS:
         data = call.data
         chat_id = call.message.chat.id
         user_id = call.from_user.id
+        
+        # Power-up info handler - ADD THIS
+        if data.startswith('info_powerup_'):
+            powerup_id = data.replace('info_powerup_', '')
+            
+            if powerup_id not in PowerUp.POWERUPS:
+                bot.answer_callback_query(call.id, "Power-up not found")
+                return
+            
+            powerup = PowerUp.POWERUPS[powerup_id]
+            user_coins = _get_user_coins(user_id)
+            can_afford = user_coins >= powerup['cost']
+            
+            info_text = (
+                f"<b>{powerup['name']}</b>\n\n"
+                f"📝 {powerup['description']}\n\n"
+                f"⏱️ Duration: {powerup['duration']} over(s)\n"
+                f"💰 Cost: {powerup['cost']} coins\n\n"
+                f"🎯 Effect: {powerup['effect']['type'].replace('_', ' ').title()}\n"
+                f"Boost: +{int(powerup['effect']['value'] * 100)}%\n\n"
+            )
+            
+            if can_afford:
+                info_text += f"✅ You have {user_coins} coins\nYou can purchase this!"
+            else:
+                info_text += f"🔒 You have {user_coins} coins\nNeed {powerup['cost'] - user_coins} more"
+            
+            bot.send_message(chat_id, info_text, parse_mode="HTML")
+            bot.answer_callback_query(call.id)
+            return
+        
+        # Power-up purchase handler - ADD THIS
+        if data.startswith('buy_powerup_'):
+            powerup_id = data.replace('buy_powerup_', '')
+            result = handle_powerup_purchase(user_id, powerup_id)
+            
+            bot.answer_callback_query(call.id, result['message'], show_alert=True)
+            
+            if result['success']:
+                # Refresh shop display
+                user_coins = _get_user_coins(user_id)
+                shop_text = (
+                    "🛒 <b>POWER-UPS SHOP</b>\n"
+                    f"💰 Your Balance: <b>{user_coins} coins</b>\n\n"
+                )
+                
+                for pid, powerup in PowerUp.POWERUPS.items():
+                    cost = powerup['cost']
+                    can_afford = user_coins >= cost
+                    status = "✅" if can_afford else "🔒"
+                    
+                    shop_text += (
+                        f"{status} <b>{powerup['name']}</b>\n"
+                        f"   {powerup['description']}\n"
+                        f"   💰 {cost} coins\n\n"
+                    )
+                
+                bot.edit_message_text(
+                    shop_text,
+                    chat_id,
+                    call.message.message_id,
+                    parse_mode="HTML",
+                    reply_markup=kb_powerups_shop()
+                )
+            return
         
         # Toss handlers
         if data in ["toss_heads", "toss_tails"]:
             choice = data.split("_")[1]
             bot.answer_callback_query(call.id, f"You chose {choice}!")
             handle_toss_result(chat_id, choice, user_id)
+            return
             
         # Bat/Bowl choice
         elif data in ["choose_bat", "choose_bowl"]:
             choice = "player" if data == "choose_bat" else "bot"
             bot.answer_callback_query(call.id, "Starting match...")
             safe_set_batting_order(chat_id, choice)
+            return
             
         # Main menu handlers
         elif data == "quick_play":
             bot.answer_callback_query(call.id, "Starting quick play...")
             safe_start_new_game(chat_id, user_id=user_id)
+            return
             
         elif data == "custom_match":
             bot.answer_callback_query(call.id, "Custom match...")
             bot.send_message(chat_id, "Choose difficulty:", reply_markup=kb_difficulty_select())
+            return
             
         elif data == "my_stats":
             bot.answer_callback_query(call.id, "Loading stats...")
             show_user_stats(chat_id, user_id)
+            return
             
         elif data == "leaderboard":
             bot.answer_callback_query(call.id, "Loading leaderboard...")
             show_leaderboard(chat_id)
-            
+            return
+        
         # Difficulty selection
         elif data.startswith("diff_"):
             difficulty = data.split("_")[1]
             bot.answer_callback_query(call.id, f"Selected {difficulty} difficulty")
             bot.send_message(chat_id, "Choose format:", reply_markup=kb_format_select())
             set_user_session_data(user_id, "selected_difficulty", difficulty)
+            return
             
         # Format selection  
         elif data.startswith("format_"):
@@ -6156,26 +6257,30 @@ def handle_callback(call):
                 difficulty = get_user_session_data(user_id, "selected_difficulty", "medium")
                 bot.answer_callback_query(call.id, f"Starting T{overs} match...")
                 safe_start_new_game(chat_id, overs, wickets, difficulty, user_id)
+            return
             
         # Post-match actions
         elif data == "play_again":
             bot.answer_callback_query(call.id, "Starting new match...")
             safe_start_new_game(chat_id, user_id=user_id)
+            return
             
         elif data == "match_summary":
             bot.answer_callback_query(call.id, "Loading summary...")
-            # Show match summary logic here
+            return
             
         elif data == "forfeit_yes":
             bot.answer_callback_query(call.id, "Match forfeited")
             delete_game(chat_id)
             bot.send_message(chat_id, "Match forfeited. Use /play for a new match.")
+            return
             
         elif data == "forfeit_no":
             bot.answer_callback_query(call.id, "Continuing match...")
             g = safe_load_game(chat_id)
             if g:
                 show_live_score(chat_id, g)
+            return
                 
         # Live score
         elif data == "live_score":
@@ -6185,47 +6290,62 @@ def handle_callback(call):
                 show_live_score(chat_id, g)
             else:
                 bot.send_message(chat_id, "No active match found.")
+            return
                 
-        # Tournament handlers (simplified)
+        # Tournament handlers
         elif data == "tournaments":
             bot.answer_callback_query(call.id, "Loading tournaments...")
-            handle_tournament_menu(chat_id)
+            handle_tournament_menu(chat_id, user_id)
+            return
             
         elif data == "challenges":
             bot.answer_callback_query(call.id, "Loading challenges...")
             show_challenges_menu(chat_id, user_id)
+            return
             
         # Back to main menu
         elif data in ["main_menu", "back_main"]:
             bot.answer_callback_query(call.id, "Main menu")
             welcome_text = f"🏏 Welcome back! What would you like to do?"
             bot.send_message(chat_id, welcome_text, reply_markup=kb_main_menu())
+            return
         
         elif data == "tournament_menu":
             handle_tournament_menu(chat_id, user_id)
+            bot.answer_callback_query(call.id)
+            return
 
         elif data == "tournament_create":
             handle_create_tournament(chat_id, user_id)
+            bot.answer_callback_query(call.id)
+            return
 
         elif data.startswith("fmt_"):
             format_key = data
             handle_tournament_type_selection(chat_id, user_id, format_key)
+            bot.answer_callback_query(call.id)
+            return
 
         elif data.startswith("type_"):
             tournament_type = data.split("_")[1]
             handle_tournament_theme_selection(chat_id, user_id, tournament_type)
+            bot.answer_callback_query(call.id)
+            return
 
         elif data.startswith("theme_"):
             theme = data.split("_")[1]
             finalize_tournament_creation(chat_id, user_id, theme)
+            bot.answer_callback_query(call.id)
+            return
 
         elif data.startswith("tourn_view_"):
             tournament_id = data.split("_")[2]
             show_tournament_participants(chat_id, tournament_id)
+            bot.answer_callback_query(call.id)
+            return
 
         elif data.startswith("join_tourn_"):
             tournament_id = data.split("_")[2]
-            user_id = call.from_user.id
             username = call.from_user.first_name or call.from_user.username
             
             try:
@@ -6235,22 +6355,18 @@ def handle_callback(call):
                     bot.answer_callback_query(call.id, "Tournament not found", show_alert=True)
                     return
                 
-                # Check if tournament is full
                 if len(tournament.participants) >= 16:
                     bot.answer_callback_query(call.id, "Tournament is full", show_alert=True)
                     return
                 
-                # Check if already joined
                 if any(p['user_id'] == user_id for p in tournament.participants):
                     bot.answer_callback_query(call.id, "Already registered", show_alert=True)
                     return
                 
-                # Add participant
                 result = tournament.add_participant(user_id, username)
                 
                 if result['success']:
-                    # Save updated tournament
-                    save_tournament_to_db(tournament, call.message.chat.id)
+                    save_tournament_to_db(tournament, chat_id)
                     
                     success_msg = (
                         f"✅ {result['message']}\n\n"
@@ -6264,7 +6380,7 @@ def handle_callback(call):
                         types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu")
                     )
                     
-                    bot.send_message(call.message.chat.id, success_msg, reply_markup=kb)
+                    bot.send_message(chat_id, success_msg, reply_markup=kb)
                     bot.answer_callback_query(call.id, "Joined successfully!", show_alert=False)
                 else:
                     bot.answer_callback_query(call.id, f"Join failed: {result['message']}", show_alert=True)
@@ -6272,9 +6388,10 @@ def handle_callback(call):
             except Exception as e:
                 logger.error(f"Error joining tournament: {e}")
                 bot.answer_callback_query(call.id, "Error joining tournament", show_alert=True)
+            return
             
         else:
-            # Log unhandled callbacks for debugging
+            # Log unhandled callbacks
             logger.warning(f"Unhandled callback: {data}")
             bot.answer_callback_query(call.id, "Feature coming soon!")
             
@@ -6370,44 +6487,6 @@ def handle_toss_callback(call):
     except Exception as e:
         logger.error(f"Error in toss callback: {e}")
         bot.answer_callback_query(call.id, "Error processing toss")
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('info_powerup_'))
-@rate_limit_check('callback')
-def handle_powerup_info(call):
-    """Show detailed power-up information"""
-    try:
-        powerup_id = call.data.replace('info_powerup_', '')
-        
-        if powerup_id not in PowerUp.POWERUPS:
-            bot.answer_callback_query(call.id, "Power-up not found")
-            return
-        
-        powerup = PowerUp.POWERUPS[powerup_id]
-        user_coins = _get_user_coins(call.from_user.id)
-        can_afford = user_coins >= powerup['cost']
-        
-        info_text = (
-            f"<b>{powerup['name']}</b>\n\n"
-            f"📝 Description:\n{powerup['description']}\n\n"
-            f"⏱️ Duration: {powerup['duration']} over(s)\n"
-            f"💰 Cost: {powerup['cost']} coins\n\n"
-            f"🎯 Effect:\n"
-            f"Type: {powerup['effect']['type'].replace('_', ' ').title()}\n"
-            f"Boost: +{int(powerup['effect']['value'] * 100)}%\n\n"
-        )
-        
-        if can_afford:
-            info_text += f"✅ You have {user_coins} coins - Can purchase!"
-        else:
-            info_text += f"🔒 You have {user_coins} coins - Need {powerup['cost'] - user_coins} more"
-        
-        bot.send_message(call.message.chat.id, info_text, parse_mode="HTML")
-        bot.answer_callback_query(call.id)
-        
-    except Exception as e:
-        logger.error(f"Error showing powerup info: {e}")
-        bot.answer_callback_query(call.id, "Error loading info")
 
 
 @bot.message_handler(commands=['coins'])

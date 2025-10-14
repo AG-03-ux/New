@@ -3847,32 +3847,73 @@ def _award_xp(user_id: int, amount: int):
     UserLevelManager.update_user_level(user_id, amount)
 
 def create_daily_challenges():
-    """Create daily challenges for all users"""
+    """Create daily challenges for all users - FIXED VERSION"""
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             
-            if is_postgres:
-                cur.execute("SELECT COUNT(*) as count FROM daily_challenges WHERE DATE(created_at) = %s", (today,))
-            else:
-                cur.execute("SELECT COUNT(*) as count FROM daily_challenges WHERE DATE(created_at) = ?", (today,))
+            # Check if challenges exist for today
+            cur.execute(f"""
+                SELECT COUNT(*) as count FROM daily_challenges 
+                WHERE DATE(created_at) = {param_style}
+            """, (today,))
             
-            count = cur.fetchone()["count"]
+            result = cur.fetchone()
+            count = result['count'] if result else 0
             
             if count > 0:
-                logger.info("Daily challenges already exist for today")
+                logger.info(f"Daily challenges already exist for {today}")
                 return
             
+            # Generate new challenges
             challenges = DailyChallenge.generate_daily_challenges(today)
             
-            for challenge in challenges:
-                _save_daily_challenge(challenge)
+            logger.info(f"Generated {len(challenges)} challenges for {today}")
             
-            logger.info(f"Created {len(challenges)} daily challenges for {today}")
+            # Save challenges to database
+            for challenge in challenges:
+                now = datetime.now(timezone.utc).isoformat()
+                expires = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO daily_challenges (
+                            type, description, target, reward_coins, reward_xp, 
+                            created_at, expires_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        challenge.type.value, 
+                        challenge.description, 
+                        challenge.target,
+                        challenge.reward_coins, 
+                        challenge.reward_xp, 
+                        now, 
+                        expires
+                    ))
+                else:
+                    cur.execute("""
+                        INSERT INTO daily_challenges (
+                            type, description, target, reward_coins, reward_xp, 
+                            created_at, expires_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        challenge.type.value, 
+                        challenge.description, 
+                        challenge.target,
+                        challenge.reward_coins, 
+                        challenge.reward_xp, 
+                        now, 
+                        expires
+                    ))
+            
+            logger.info(f"✓ Created {len(challenges)} daily challenges for {today}")
+            
     except Exception as e:
-        logger.error(f"Error creating daily challenges: {e}")
+        logger.error(f"Error creating daily challenges: {e}", exc_info=True)
 
 
 def _save_daily_challenge(challenge: DailyChallenge):
@@ -4598,14 +4639,14 @@ def check_innings_end(g: Dict[str, Any]) -> dict:
         if g["bot_wkts"] >= g["wickets_limit"]:
             return {'innings_end': True, 'reason': 'all_out'}
     
-    # Check overs - FIXED: Must complete full over
-    if g["overs_bowled"] >= g["overs_limit"]:
+    # Check overs - MUST complete full over (6 balls)
+    if g["overs_bowled"] >= g["overs_limit"] and g["balls_in_over"] == 0:
         return {'innings_end': True, 'reason': 'overs_complete'}
     
-    # Check target in second innings
+    # Check target in second innings - FIXED: Only end if target is EXCEEDED
     if g["innings"] == 2 and g.get("target"):
         current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
-        if current_score >= g["target"]:
+        if current_score > g["target"]:  # Changed from >= to >
             return {'innings_end': True, 'reason': 'target_achieved'}
     
     return {'innings_end': False, 'reason': None}
@@ -5023,7 +5064,7 @@ def determine_match_result(game_data: Dict[str, Any]) -> Dict[str, Any]:
             'winner': 'bot',
             'result_type': 'loss',
             'margin': wickets_left if wickets_left > 0 else 0,
-            'margin_type': 'wickets'
+            'margin_type': 'wickets' if wickets_left > 0 else 'runs'  # Added fallback
         }
     else:
         result = {
@@ -5696,6 +5737,43 @@ def show_achievements(chat_id: int, user_id: int):
     except Exception as e:
         logger.error(f"Error showing achievements: {e}")
         bot.send_message(chat_id, "❌ Error loading achievements. Please try again.")
+
+
+def verify_inventory_table():
+    """Ensure inventory table exists"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                autoincrement = "SERIAL PRIMARY KEY"
+                bigint = "BIGINT"
+                text_type = "TEXT"
+                timestamp_type = "TIMESTAMPTZ"
+            else:
+                autoincrement = "INTEGER PRIMARY KEY AUTOINCREMENT"
+                bigint = "INTEGER"
+                text_type = "TEXT"
+                timestamp_type = "TEXT"
+            
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_inventory (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    item_type {text_type} NOT NULL,
+                    item_id {text_type} NOT NULL,
+                    quantity INTEGER DEFAULT 1,
+                    acquired_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, item_type, item_id)
+                )
+            """)
+            
+            logger.info("✓ Inventory table verified")
+            
+    except Exception as e:
+        logger.error(f"Error verifying inventory table: {e}")
+
 
 def ensure_user(message: types.Message):
     if message.from_user:
@@ -6674,25 +6752,54 @@ def cmd_leaderboard(message):
 @bot.message_handler(commands=['inventory'])
 @rate_limit_check('command')
 def cmd_inventory(message):
-    """Show user inventory"""
+    """Show user inventory - FIXED VERSION"""
     try:
+        user_id = message.from_user.id
+        
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
             
-            cur.execute(f"""
-                SELECT item_type, item_id, quantity
-                FROM user_inventory
-                WHERE user_id = {param_style}
-            """, (message.from_user.id,))
+            # Check if user_inventory table exists
+            try:
+                cur.execute(f"""
+                    SELECT item_type, item_id, quantity
+                    FROM user_inventory
+                    WHERE user_id = {param_style}
+                """, (user_id,))
+                
+                items = cur.fetchall()
+            except Exception as e:
+                logger.error(f"Inventory table query failed: {e}")
+                # Table might not exist, create it
+                text = (
+                    "🎒 YOUR INVENTORY\n"
+                    f"{'═'*40}\n\n"
+                    "Your inventory is empty!\n\n"
+                    "💡 Purchase power-ups with /powerups\n"
+                    "💰 Earn coins by playing matches!"
+                )
+                bot.send_message(message.chat.id, text)
+                return
             
-            items = cur.fetchall()
-            
-            if not items:
-                text = "🎒 Your inventory is empty!\nPurchase items from /powerups"
+            if not items or len(items) == 0:
+                text = (
+                    "🎒 YOUR INVENTORY\n"
+                    f"{'═'*40}\n\n"
+                    "Your inventory is empty!\n\n"
+                    "💡 Purchase power-ups with /powerups\n"
+                    "💰 Earn coins by playing matches!"
+                )
             else:
-                text = "🎒 YOUR INVENTORY\n" + "═" * 40 + "\n\n"
+                text = (
+                    "🎒 YOUR INVENTORY\n"
+                    f"{'═'*40}\n\n"
+                )
+                
+                # Group items by type
+                powerups = []
+                other_items = []
                 
                 for item in items:
                     item_type = item['item_type']
@@ -6701,14 +6808,42 @@ def cmd_inventory(message):
                     
                     if item_type == 'powerup' and item_id in PowerUp.POWERUPS:
                         powerup = PowerUp.POWERUPS[item_id]
-                        text += f"{powerup['name']} x{quantity}\n"
+                        powerups.append(f"• {powerup['name']} x{quantity}")
+                    else:
+                        other_items.append(f"• {item_id} x{quantity}")
                 
-                text += f"\n💡 Use /powerups to purchase more items"
+                if powerups:
+                    text += "💪 <b>POWER-UPS:</b>\n"
+                    text += "\n".join(powerups)
+                    text += "\n\n"
+                
+                if other_items:
+                    text += "🎁 <b>OTHER ITEMS:</b>\n"
+                    text += "\n".join(other_items)
+                    text += "\n\n"
+                
+                text += (
+                    f"{'─'*40}\n"
+                    "💡 Use power-ups before matches to gain advantages!\n"
+                    "🛒 Purchase more with /powerups"
+                )
             
-            bot.send_message(message.chat.id, text)
+            bot.send_message(message.chat.id, text, parse_mode="HTML")
+            
     except Exception as e:
-        logger.error(f"Error in inventory command: {e}")
-        bot.reply_to(message, "❌ Error loading inventory")
+        logger.error(f"Error in inventory command: {e}", exc_info=True)
+        
+        # Send user-friendly error message
+        error_text = (
+            "🎒 YOUR INVENTORY\n"
+            f"{'═'*40}\n\n"
+            "Unable to load inventory at the moment.\n\n"
+            "This could mean:\n"
+            "• You haven't purchased any items yet\n"
+            "• Database is initializing\n\n"
+            "Try /powerups to view the shop!"
+        )
+        bot.send_message(message.chat.id, error_text)
 
 
 @bot.message_handler(commands=['profile'])
@@ -6832,47 +6967,135 @@ def cmd_replay(message):
 @bot.message_handler(commands=['daily'])
 @rate_limit_check('command')
 def cmd_daily(message):
-    """Show daily challenges"""
+    """Show daily challenges - FIXED VERSION"""
     try:
-        tracker = ChallengeTracker(message.from_user.id)
+        user_id = message.from_user.id
         
-        if not tracker.active_challenges:
-            text = (
-                "📋 DAILY CHALLENGES\n\n"
-                "No active challenges at the moment!\n"
-                "Challenges refresh daily at midnight UTC.\n\n"
-                "Come back later! 🎯"
-            )
-        else:
+        # Ensure challenges exist
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Get active challenges
+            param_style = "%s" if is_postgres else "?"
+            cur.execute(f"""
+                SELECT * FROM daily_challenges 
+                WHERE expires_at > {param_style}
+                ORDER BY created_at DESC
+            """, (now,))
+            
+            active_challenges = cur.fetchall()
+        
+        if not active_challenges:
+            # Try to create challenges if none exist
+            logger.info("No active challenges found, creating new ones...")
+            create_daily_challenges()
+            
+            # Try again
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(f"""
+                    SELECT * FROM daily_challenges 
+                    WHERE expires_at > {param_style}
+                    ORDER BY created_at DESC
+                """, (now,))
+                active_challenges = cur.fetchall()
+        
+        if not active_challenges:
             text = (
                 "📋 DAILY CHALLENGES\n"
-                "Complete challenges to earn rewards!\n"
                 f"{'═'*40}\n\n"
+                "No active challenges at the moment!\n\n"
+                "🔄 Challenges refresh daily at midnight UTC.\n"
+                "⏰ Next refresh in: [calculated]\n\n"
+                "Come back later! 🎯"
             )
-            
-            for challenge in tracker.active_challenges:
-                progress = tracker.progress.get(challenge['id'], 0)
-                target = challenge['target']
-                completed = challenge.get('completed', False)
-                claimed = challenge.get('claimed', False)
-                
-                if completed and claimed:
-                    status = "✅ CLAIMED"
-                elif completed:
-                    status = "🎁 READY TO CLAIM"
-                else:
-                    status = f"📊 {progress}/{target}"
-                
-                text += (
-                    f"{challenge.get('icon', '🎯')} {challenge['description']}\n"
-                    f"   Status: {status}\n"
-                    f"   Reward: {challenge['reward_coins']} coins | {challenge['reward_xp']} XP\n\n"
-                )
+            bot.send_message(message.chat.id, text)
+            return
         
-        bot.send_message(message.chat.id, text)
+        # Get user's progress on challenges
+        tracker = ChallengeTracker(user_id)
+        
+        text = (
+            "📋 DAILY CHALLENGES\n"
+            f"{'═'*40}\n"
+            "Complete challenges to earn rewards!\n\n"
+        )
+        
+        for challenge in active_challenges:
+            challenge_id = challenge['id']
+            progress = tracker.progress.get(challenge_id, 0)
+            target = challenge['target']
+            completed = challenge.get('completed', False)
+            
+            # Get completion status from user_challenges table
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                param_style = "%s" if is_postgres else "?"
+                cur.execute(f"""
+                    SELECT completed, claimed FROM user_challenges 
+                    WHERE user_id = {param_style} AND challenge_id = {param_style}
+                """, (user_id, challenge_id))
+                user_challenge = cur.fetchone()
+            
+            if user_challenge:
+                completed = user_challenge['completed']
+                claimed = user_challenge['claimed']
+            else:
+                completed = False
+                claimed = False
+            
+            # Status display
+            if claimed:
+                status = "✅ CLAIMED"
+                progress_bar = "████████████"
+            elif completed:
+                status = "🎁 READY TO CLAIM"
+                progress_bar = "████████████"
+            else:
+                status = f"📊 {progress}/{target}"
+                progress_pct = min(progress / target, 1.0) if target > 0 else 0
+                filled = int(progress_pct * 12)
+                progress_bar = "█" * filled + "░" * (12 - filled)
+            
+            # Difficulty emoji
+            diff_emoji = {
+                "easy": "🟢",
+                "medium": "🟡", 
+                "hard": "🔴"
+            }.get(challenge.get('difficulty', 'medium'), "🟡")
+            
+            text += (
+                f"{diff_emoji} <b>{challenge['description']}</b>\n"
+                f"   Status: {status}\n"
+                f"   [{progress_bar}]\n"
+                f"   💰 {challenge['reward_coins']} coins | "
+                f"⭐ {challenge['reward_xp']} XP\n\n"
+            )
+        
+        text += (
+            f"{'─'*40}\n"
+            "💡 Play matches to complete challenges!\n"
+            "🎁 Use /daily to claim completed rewards"
+        )
+        
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            types.InlineKeyboardButton("🎁 Claim Rewards", callback_data="challenges_claim"),
+            types.InlineKeyboardButton("📊 Challenge History", callback_data="challenges_history"),
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
+        )
+        
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=kb)
         
     except Exception as e:
-        logger.error(f"Error in daily command: {e}")
+        logger.error(f"Error in daily command: {e}", exc_info=True)
+        bot.send_message(
+            message.chat.id,
+            "❌ Error loading daily challenges.\n\n"
+            "Try /createchallenges to generate new challenges."
+        )
 
 
 @bot.message_handler(commands=['quickmatch', 'qm'])
@@ -7375,6 +7598,28 @@ def handle_help_callback(call):
     )
     bot.send_message(call.message.chat.id, help_text)
     bot.answer_callback_query(call.id)
+
+
+@bot.message_handler(commands=['createchallenges'])
+def cmd_create_challenges(message):
+    """Manually create daily challenges - Admin or for testing"""
+    try:
+        # Allow any user to trigger (or restrict to admins)
+        if message.from_user.id not in ADMIN_IDS and len(ADMIN_IDS) > 0:
+            bot.send_message(message.chat.id, "❌ Admin access required.")
+            return
+        
+        create_daily_challenges()
+        
+        bot.send_message(
+            message.chat.id, 
+            "✅ Daily challenges created! Use /daily to view them."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in create challenges command: {e}")
+        bot.send_message(message.chat.id, "❌ Error creating challenges.")
+
 
 
 @bot.message_handler(func=lambda message: True)
@@ -8296,10 +8541,21 @@ if __name__ == "__main__":
         logger.info("Initializing database...")
         db_init()
         
+        # Verify additional tables
+        verify_inventory_table()
+
         # Create scheduled tasks
         logger.info("Setting up scheduled tasks...")
         create_daily_challenges()
         
+        # Create initial daily challenges
+        logger.info("Creating initial daily challenges...")
+        try:
+            create_daily_challenges()
+            logger.info("✓ Daily challenges initialized")
+        except Exception as e:
+            logger.warning(f"Could not create initial challenges: {e}")
+
         # Start scheduler in background
         def run_scheduled_tasks():
             schedule.every().day.at("00:00").do(create_daily_challenges)

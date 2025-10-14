@@ -1340,12 +1340,21 @@ class PowerUp:
 
 
 def kb_powerups_shop() -> types.InlineKeyboardMarkup:
-    """Power-ups shop keyboard"""
-    kb = types.InlineKeyboardMarkup(row_width=1)
+    """Power-ups shop keyboard with info buttons"""
+    kb = types.InlineKeyboardMarkup(row_width=2)
     
     for powerup_id, powerup in PowerUp.POWERUPS.items():
-        text = f"{powerup['name']} - {powerup['cost']} coins"
-        kb.add(types.InlineKeyboardButton(text, callback_data=f"buy_powerup_{powerup_id}"))
+        # Purchase button
+        buy_btn = types.InlineKeyboardButton(
+            f"💰 {powerup['name'][:15]} - {powerup['cost']}c",
+            callback_data=f"buy_powerup_{powerup_id}"
+        )
+        # Info button
+        info_btn = types.InlineKeyboardButton(
+            "ℹ️",
+            callback_data=f"info_powerup_{powerup_id}"
+        )
+        kb.row(buy_btn, info_btn)
     
     kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
     return kb
@@ -4578,21 +4587,23 @@ def check_powerplay_status(g: Dict[str, Any]) -> bool:
     return False
 
 def check_innings_end(g: Dict[str, Any]) -> dict:
-    """Check if innings should end - returns dict with details"""
+    """Check if innings should end - FIXED VERSION"""
     current_batting = g["batting"]
     
-    # Check wickets
-    if current_batting == "player" and g["player_wkts"] >= g["wickets_limit"]:
-        return {'innings_end': True, 'reason': 'all_out'}
-    elif current_batting == "bot" and g["bot_wkts"] >= g["wickets_limit"]:
-        return {'innings_end': True, 'reason': 'all_out'}
+    # Check wickets first
+    if current_batting == "player":
+        if g["player_wkts"] >= g["wickets_limit"]:
+            return {'innings_end': True, 'reason': 'all_out'}
+    else:
+        if g["bot_wkts"] >= g["wickets_limit"]:
+            return {'innings_end': True, 'reason': 'all_out'}
     
-    # Check overs
+    # Check overs - FIXED: Must complete full over
     if g["overs_bowled"] >= g["overs_limit"]:
         return {'innings_end': True, 'reason': 'overs_complete'}
     
-    # Check target achieved in second innings
-    if g["innings"] == 2 and g["target"]:
+    # Check target in second innings
+    if g["innings"] == 2 and g.get("target"):
         current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
         if current_score >= g["target"]:
             return {'innings_end': True, 'reason': 'target_achieved'}
@@ -4600,7 +4611,7 @@ def check_innings_end(g: Dict[str, Any]) -> dict:
     return {'innings_end': False, 'reason': None}
 
 def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
-    """Enhanced version with tournament and challenge integration - REPLACE EXISTING"""
+    """Enhanced version with tournament and challenge integration - FIXED"""
     if not (1 <= user_value <= 6):
         return "Please send a number between 1 and 6"
     
@@ -4616,8 +4627,6 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
         
         bot_value = calculate_bot_move(game_state.data, user_value)
         logger.debug(f"User: {user_value}, Bot: {bot_value}")
-        
-        game_state.update(balls_in_over=game_state.data['balls_in_over'] + 1)
         
         is_wicket = (user_value == bot_value)
         runs_scored = 0
@@ -4635,11 +4644,9 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
                 
                 if runs_scored == 4:
                     updates['player_fours'] = game_state.data['player_fours'] + 1
-                    # Enhanced animation for boundaries
                     AnimationManager.send_animation(chat_id, "four", "⚡ BOUNDARY!")
                 elif runs_scored == 6:
                     updates['player_sixes'] = game_state.data['player_sixes'] + 1
-                    # Enhanced animation for sixes
                     AnimationManager.send_animation(chat_id, "six", "🚀 MAXIMUM!")
                 
                 game_state.update(**updates)
@@ -4648,7 +4655,6 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
             
             if is_wicket:
                 game_state.update(bot_wkts=game_state.data['bot_wkts'] + 1)
-                # Wicket animation for bowling
                 AnimationManager.send_animation(chat_id, "wicket", "💥 WICKET!")
             else:
                 runs_scored = bot_value
@@ -4670,8 +4676,22 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
             if previous_score < 100:
                 AnimationManager.send_animation(chat_id, "century", "💯 CENTURY!")
         
-        over_completed = check_over_completion(game_state.data)
-        powerplay_ended = check_powerplay_status(game_state.data)
+        # CRITICAL FIX: Update balls_in_over AFTER processing the ball
+        game_state.data['balls_in_over'] += 1
+        
+        over_completed = False
+        powerplay_ended = False
+        
+        # Check for over completion
+        if game_state.data['balls_in_over'] >= 6:
+            game_state.data['balls_in_over'] = 0
+            game_state.data['overs_bowled'] += 1
+            over_completed = True
+        
+        # Check powerplay status
+        if game_state.data.get('is_powerplay') and game_state.data['overs_bowled'] >= game_state.data.get('powerplay_overs', 0):
+            game_state.data['is_powerplay'] = False
+            powerplay_ended = True
         
         if not game_state.save():
             logger.error("Failed to save game state")
@@ -4681,13 +4701,15 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
         tracker = ChallengeTracker(user_id)
         
         if current_batting == "player":
-            # Update score-based challenges
             tracker.update_progress(ChallengeType.SCORE, game_state.data['player_score'], game_state.data)
             tracker.update_progress(ChallengeType.SIXES, game_state.data['player_sixes'])
             tracker.update_progress(ChallengeType.BOUNDARIES, 
                                   game_state.data['player_fours'] + game_state.data['player_sixes'])
         
-        if check_innings_end(game_state.data):
+        # CRITICAL FIX: Check innings end PROPERLY
+        innings_check = check_innings_end(game_state.data)
+        
+        if innings_check['innings_end']:
             result = end_innings_or_match_v2(game_state, user_id)
             return {
                 'commentary': commentary,
@@ -4713,7 +4735,6 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
     except Exception as e:
         logger.error(f"Error processing ball for chat {chat_id}, user {user_id}: {e}", exc_info=True)
         return "An error occurred while processing your move. Please try again."
-    pass
 
 def show_live_score(chat_id: int, g: Dict[str, Any], detailed: bool = True):
     try:
@@ -5793,22 +5814,105 @@ def cmd_help(message):
         logger.info(f"Received /help from user {message.from_user.id}")
         
         help_text = (
-            "🏏 <b>Cricket Bot Help</b>\n\n"
-            "<b>Commands:</b>\n"
-            "/start - Start the bot\n"
-            "/play - Start a quick match\n"
-            "/stats - View your statistics\n"
-            "/help - Show this help message\n\n"
-            "<b>How to Play:</b>\n"
-            "• Choose numbers 1-6 for each ball\n"
-            "• Same numbers = OUT!\n"
-            "• Different numbers = RUNS!\n"
+            "🏏 <b>CRICKET BOT HELP</b>\n\n"
+            
+            "🎮 <b>GAMEPLAY COMMANDS</b>\n"
+            "/play - Start a new match\n"
+            "/quickmatch or /qm - Quick T2 match\n"
+            "/score - View current score\n\n"
+            
+            "📊 <b>STATS & PROGRESS</b>\n"
+            "/stats - Your statistics\n"
+            "/profile - Your profile\n"
+            "/achievements - View achievements\n"
+            "/inventory - Your items\n"
+            "/replay - Last match summary\n\n"
+            
+            "🏆 <b>COMPETITIVE</b>\n"
+            "/leaderboard or /rankings - View rankings\n"
+            "/daily - Daily challenges\n"
+            "/tournaments - Tournament menu\n\n"
+            
+            "🛒 <b>SHOP & ITEMS</b>\n"
+            "/powerups - Power-ups shop\n\n"
+            
+            "ℹ️ <b>INFORMATION</b>\n"
+            "/commands - Full command list\n"
+            "/help - This help message\n\n"
+            
+            "<b>📖 HOW TO PLAY:</b>\n"
+            "• Send numbers 1-6 for each ball\n"
+            "• Same number = OUT! ❌\n"
+            "• Different numbers = RUNS! ✅\n"
+            "• Win the toss to choose bat/bowl\n\n"
+            
+            "Need more help? Use /commands for detailed info!"
         )
         
         bot.send_message(message.chat.id, help_text)
         
     except Exception as e:
         logger.error(f"Error in /help handler: {e}", exc_info=True)
+
+
+
+@bot.message_handler(commands=['commands'])
+def cmd_commands(message):
+    """Comprehensive command list"""
+    try:
+        commands_text = (
+            "📋 <b>COMPLETE COMMAND LIST</b>\n"
+            f"{'═'*50}\n\n"
+            
+            "🎮 <b>GAME COMMANDS</b>\n"
+            "/play - Start new match (choose format)\n"
+            "/quickmatch, /qm - Quick T2 match\n"
+            "/score - View live score\n"
+            "/forfeit - Forfeit current match\n\n"
+            
+            "👤 <b>PROFILE & STATS</b>\n"
+            "/profile - View your profile\n"
+            "/stats - Detailed statistics\n"
+            "/achievements - Achievement showcase\n"
+            "/inventory - Your items & power-ups\n"
+            "/replay - Last match replay\n\n"
+            
+            "🏆 <b>COMPETITIVE</b>\n"
+            "/leaderboard - Global rankings\n"
+            "/rankings - Same as leaderboard\n"
+            "/daily - Daily challenges\n"
+            "/tournaments - Tournament system\n\n"
+            
+            "🛒 <b>SHOP & ECONOMY</b>\n"
+            "/powerups - Buy power-ups\n"
+            "/coins - Check coin balance\n\n"
+            
+            "ℹ️ <b>INFORMATION</b>\n"
+            "/help - Quick help guide\n"
+            "/commands - This list\n"
+            "/start - Welcome message\n\n"
+            
+            "🎯 <b>MATCH FORMATS</b>\n"
+            "• T1 - 1 over, 1 wicket (Blitz)\n"
+            "• T2 - 2 overs, 1 wicket (Quick)\n"
+            "• T5 - 5 overs, 2 wickets (Classic)\n"
+            "• T10 - 10 overs, 3 wickets (Power)\n"
+            "• T20 - 20 overs, 5 wickets (Premier)\n\n"
+            
+            "💡 <b>PRO TIPS</b>\n"
+            "• Complete daily challenges for rewards\n"
+            "• Use power-ups strategically\n"
+            "• Check leaderboards for competition\n"
+            "• Join tournaments for prizes\n\n"
+            
+            f"{'═'*50}\n"
+            "Need help? Contact support or use /help"
+        )
+        
+        bot.send_message(message.chat.id, commands_text)
+        
+    except Exception as e:
+        logger.error(f"Error in /commands handler: {e}")
 
 
 @bot.message_handler(commands=['stats'])
@@ -6104,11 +6208,30 @@ def handle_callback(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('lb_'))
 @rate_limit_check('callback')
 def handle_leaderboard_callback(call):
-    """Handle leaderboard selection"""
+    """Handle leaderboard selection - FIXED"""
     try:
         category = call.data.replace('lb_', '')
-        top_players = get_leaderboard(category, limit=10)
-        display = generate_leaderboard_display(category, top_players)
+        
+        # Map callback data to actual database categories
+        category_map = {
+            'highest_score': 'highest_score',
+            'most_wins': 'most_wins', 
+            'win_streak': 'win_streak',
+            'most_sixes': 'most_sixes',
+            'best_strike_rate': 'best_strike_rate',
+            'tournament_wins': 'tournament_wins',
+            'total_xp': 'total_xp'
+        }
+        
+        actual_category = category_map.get(category, category)
+        
+        # Get leaderboard data
+        top_players = get_leaderboard(actual_category, limit=10)
+        
+        if not top_players:
+            display = f"📊 No data available for {category.replace('_', ' ').title()} yet!"
+        else:
+            display = generate_leaderboard_display(actual_category, top_players)
         
         bot.edit_message_text(
             display,
@@ -6117,6 +6240,7 @@ def handle_leaderboard_callback(call):
             reply_markup=kb_leaderboard_categories()
         )
         bot.answer_callback_query(call.id)
+        
     except Exception as e:
         logger.error(f"Error in leaderboard callback: {e}")
         bot.answer_callback_query(call.id, "Error loading leaderboard")
@@ -6168,6 +6292,72 @@ def handle_toss_callback(call):
     except Exception as e:
         logger.error(f"Error in toss callback: {e}")
         bot.answer_callback_query(call.id, "Error processing toss")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('info_powerup_'))
+@rate_limit_check('callback')
+def handle_powerup_info(call):
+    """Show power-up information"""
+    try:
+        powerup_id = call.data.replace('info_powerup_', '')
+        
+        if powerup_id not in PowerUp.POWERUPS:
+            bot.answer_callback_query(call.id, "Power-up not found")
+            return
+        
+        powerup = PowerUp.POWERUPS[powerup_id]
+        
+        info_text = (
+            f"{powerup['name']}\n\n"
+            f"📝 {powerup['description']}\n\n"
+            f"⏱️ Duration: {powerup['duration']} over(s)\n"
+            f"💰 Cost: {powerup['cost']} coins\n\n"
+            f"Effect: {powerup['effect']['type'].replace('_', ' ').title()}\n"
+            f"Value: +{int(powerup['effect']['value'] * 100)}%"
+        )
+        
+        bot.answer_callback_query(call.id, info_text, show_alert=True)
+        
+    except Exception as e:
+        logger.error(f"Error showing powerup info: {e}")
+        bot.answer_callback_query(call.id, "Error loading info")
+
+
+@bot.message_handler(commands=['coins'])
+@rate_limit_check('command')
+def cmd_coins(message):
+    """Check coin balance"""
+    try:
+        user_id = message.from_user.id
+        coins = _get_user_coins(user_id)
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get level for bonus info
+            cur.execute(f"SELECT level FROM user_levels WHERE user_id = {param_style}", (user_id,))
+            level_row = cur.fetchone()
+            level = level_row['level'] if level_row else 1
+        
+        coins_text = (
+            f"💰 <b>YOUR COINS</b>\n\n"
+            f"Balance: <b>{coins}</b> coins\n"
+            f"Level: {level}\n\n"
+            f"<b>Earn Coins:</b>\n"
+            f"• Win matches: 50 coins\n"
+            f"• Complete daily challenges\n"
+            f"• Level up rewards\n"
+            f"• Tournament prizes\n\n"
+            f"<b>Spend Coins:</b>\n"
+            f"Use /powerups to buy power-ups!"
+        )
+        
+        bot.send_message(message.chat.id, coins_text)
+        
+    except Exception as e:
+        logger.error(f"Error in coins command: {e}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ["choose_bat", "choose_bowl"])

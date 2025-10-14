@@ -9135,42 +9135,6 @@ def cmd_db_version(message: types.Message):
         logger.error(f"Error checking DB version: {e}")
         bot.send_message(message.chat.id, "❌ Error checking database version.")
 
-@bot.message_handler(commands=['migrate'])
-def cmd_migrate(message: types.Message):
-    """Run database migrations - Admin only"""
-    try:
-        if message.from_user.id not in ADMIN_IDS:
-            bot.send_message(message.chat.id, "❌ Admin access required.")
-            return
-        
-        bot.send_message(message.chat.id, "🔄 Running migrations and creating tables...")
-        
-        old_version = get_db_version()
-        create_additional_tables()
-        create_anticheat_tables()
-        migrate_database()
-        new_version = get_db_version()
-        
-        success_msg = (
-            f"✅ <b>Database Initialization Complete</b>\n\n"
-            f"✓ user_inventory table created\n"
-            f"✓ user_achievements table created\n"
-            f"✓ match_analytics table created\n"
-            f"✓ leaderboards table created\n"
-            f"✓ powerups table created\n"
-            f"✓ user_friends table created\n"
-            f"✓ match_replays table created\n"
-            f"✓ Anti-cheat tables created\n\n"
-            f"Database version: {old_version} → {new_version}\n\n"
-            f"All tables ready for use!"
-        )
-        
-        bot.send_message(message.chat.id, success_msg, parse_mode="HTML")
-        logger.info("Database migration completed by admin")
-        
-    except Exception as e:
-        logger.error(f"Error running migrations: {e}", exc_info=True)
-        bot.send_message(message.chat.id, f"❌ Migration failed: {e}")
 
 # Flask app for webhook mode
 app = Flask(__name__)
@@ -9407,6 +9371,45 @@ def check_user_admin(message):
         bot.send_message(message.chat.id, response)
     except:
         bot.send_message(message.chat.id, "Usage: /checkuser <user_id>")
+
+
+@bot.message_handler(commands=['migrate'])
+def cmd_migrate(message: types.Message):
+    """Run database migrations - Admin only"""
+    try:
+        if message.from_user.id not in ADMIN_IDS:
+            bot.send_message(message.chat.id, "❌ Admin access required.")
+            return
+        
+        bot.send_message(message.chat.id, "🔄 Running migrations and creating tables...")
+        
+        old_version = get_db_version()
+        create_additional_tables()
+        create_anticheat_tables()
+        migrate_database()
+        new_version = get_db_version()
+        
+        success_msg = (
+            f"✅ <b>Database Initialization Complete</b>\n\n"
+            f"✓ user_inventory table created\n"
+            f"✓ user_achievements table created\n"
+            f"✓ match_analytics table created\n"
+            f"✓ leaderboards table created\n"
+            f"✓ powerups table created\n"
+            f"✓ user_friends table created\n"
+            f"✓ match_replays table created\n"
+            f"✓ Anti-cheat tables created\n\n"
+            f"Database version: {old_version} → {new_version}\n\n"
+            f"All tables ready for use!"
+        )
+        
+        bot.send_message(message.chat.id, success_msg, parse_mode="HTML")
+        logger.info("Database migration completed by admin")
+        
+    except Exception as e:
+        logger.error(f"Error running migrations: {e}", exc_info=True)
+        bot.send_message(message.chat.id, f"❌ Migration failed: {e}")
+
 
 @bot.message_handler(commands=['ban'])
 def ban_user_admin(message):

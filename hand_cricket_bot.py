@@ -1224,6 +1224,171 @@ def anticheat_middleware(func):
     return wrapper
 
 
+class CricketShopItem:
+    """Represents a shop item with unlock conditions"""
+    def __init__(self, item_id, name, emoji, description, cost, unlock_requirement=None, category="equipment"):
+        self.item_id = item_id
+        self.name = name
+        self.emoji = emoji
+        self.description = description
+        self.cost = cost
+        self.unlock_requirement = unlock_requirement  # {'type': 'runs', 'value': 100}
+        self.category = category
+
+
+CRICKET_SHOP_ITEMS = {
+    # Equipment
+    "wooden_bat": CricketShopItem(
+        "wooden_bat", "Wooden Bat", "🪵", "Classic wooden bat", 50,
+        unlock_requirement={"type": "runs", "value": 0},  # Unlocked from start
+        category="equipment"
+    ),
+    "carbon_bat": CricketShopItem(
+        "carbon_bat", "Carbon Bat", "⚫", "High-tech carbon fiber bat",
+        100, unlock_requirement={"type": "runs", "value": 100}, category="equipment"
+    ),
+    "golden_bat": CricketShopItem(
+        "golden_bat", "Golden Bat", "🟡", "Legendary golden bat",
+        500, unlock_requirement={"type": "runs", "value": 500}, category="equipment"
+    ),
+    
+    # Gloves
+    "leather_gloves": CricketShopItem(
+        "leather_gloves", "Leather Gloves", "🧤", "Comfortable leather gloves",
+        40, unlock_requirement={"type": "runs", "value": 0}, category="gloves"
+    ),
+    "padded_gloves": CricketShopItem(
+        "padded_gloves", "Padded Gloves", "🔒", "Extra padding for protection",
+        80, unlock_requirement={"type": "wins", "value": 5}, category="gloves"
+    ),
+    "armor_gloves": CricketShopItem(
+        "armor_gloves", "Armor Gloves", "🛡️", "Heavy duty armor gloves",
+        250, unlock_requirement={"type": "wins", "value": 25}, category="gloves"
+    ),
+    
+    # Helmets
+    "basic_helmet": CricketShopItem(
+        "basic_helmet", "Basic Helmet", "🪖", "Standard protective helmet",
+        60, unlock_requirement={"type": "runs", "value": 0}, category="helmets"
+    ),
+    "pro_helmet": CricketShopItem(
+        "pro_helmet", "Pro Helmet", "⚪", "Professional-grade helmet",
+        150, unlock_requirement={"type": "runs", "value": 300}, category="helmets"
+    ),
+    
+    # Power-ups
+    "quick_bat": CricketShopItem(
+        "quick_bat", "Quick Bat Boost", "⚡", "Increases bat speed",
+        75, unlock_requirement={"type": "runs", "value": 50}, category="powerups"
+    ),
+    "lucky_charm": CricketShopItem(
+        "lucky_charm", "Lucky Charm", "🍀", "Increases luck factor",
+        100, unlock_requirement={"type": "wins", "value": 3}, category="powerups"
+    ),
+}
+
+
+
+class ShopUnlockNotifier:
+    """Handles visual notifications when items are unlocked"""
+    
+    UNLOCK_ANIMATIONS = {
+        "equipment": [
+            "🏏✨ Equipment Unlocked! ✨🏏",
+            "   ╔═══════════════════╗",
+            "   ║  🟩🟩🟩 UNLOCKED  ║",
+            "   ║  New equipment    ║",
+            "   ║  added to shop!   ║",
+            "   ╚═══════════════════╝",
+        ],
+        "gloves": [
+            "🧤✨ Gloves Unlocked! ✨🧤",
+            "   ╔═══════════════════╗",
+            "   ║  🟩🟩🟩 UNLOCKED  ║",
+            "   ║  New gloves in    ║",
+            "   ║  the shop!        ║",
+            "   ╚═══════════════════╝",
+        ],
+        "helmets": [
+            "🪖✨ Helmet Unlocked! ✨🪖",
+            "   ╔═══════════════════╗",
+            "   ║  🟩🟩🟩 UNLOCKED  ║",
+            "   ║  New helmet       ║",
+            "   ║  available!       ║",
+            "   ╚═══════════════════╝",
+        ],
+        "powerups": [
+            "⚡✨ Power-Up Unlocked! ✨⚡",
+            "   ╔═══════════════════╗",
+            "   ║  🟩🟩🟩 UNLOCKED  ║",
+            "   ║  New power-up     ║",
+            "   ║  ready to use!    ║",
+            "   ╚═══════════════════╝",
+        ]
+    }
+    
+    @staticmethod
+    def show_unlock_notification(chat_id: int, user_id: int, item_id: str):
+        """Show unlock notification when item is unlocked"""
+        try:
+            item = CRICKET_SHOP_ITEMS.get(item_id)
+            if not item:
+                return
+            
+            category = item.category
+            animation_frames = ShopUnlockNotifier.UNLOCK_ANIMATIONS.get(category, [])
+            
+            unlock_msg = (
+                f"🎉 <b>NEW ITEM UNLOCKED!</b> 🎉\n\n"
+                f"{item.emoji} <b>{item.name}</b>\n"
+                f"{item.description}\n\n"
+            )
+            
+            if animation_frames:
+                unlock_msg += "\n".join(animation_frames)
+            
+            unlock_msg += (
+                f"\n\n💡 Visit /shop to purchase this item!\n"
+                f"💰 Cost: {item.cost} coins"
+            )
+            
+            # Send with special formatting
+            bot.send_message(chat_id, f"<pre>{unlock_msg}</pre>", parse_mode="HTML")
+            
+            # Send a separate message with shop button
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🛒 Go to Shop", callback_data="shop_all"))
+            
+            bot.send_message(
+                chat_id,
+                f"✨ {item.emoji} {item.name} is now available in the shop!",
+                reply_markup=kb
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing unlock notification: {e}")
+    
+    @staticmethod
+    def check_for_unlocks(user_id: int, chat_id: int):
+        """Check if any new items have been unlocked"""
+        try:
+            newly_unlocked = []
+            for item_id, item in CRICKET_SHOP_ITEMS.items():
+                if not item.unlock_requirement:
+                    continue
+                
+                unlock_info = get_item_unlock_progress(user_id, item_id)
+                
+                if unlock_info["unlocked"]:
+                    newly_unlocked.append(item_id)
+            
+            return newly_unlocked
+            
+        except Exception as e:
+            logger.error(f"Error checking for unlocks: {e}")
+            return []
+
+
 class PowerUpType(Enum):
     BATTING_BOOST = "batting_boost"
     BOWLING_BOOST = "bowling_boost"
@@ -3458,6 +3623,357 @@ def handle_milestone_achievement(chat_id: int, user_id: int, milestone_type: str
         _award_xp(user_id, xp_rewards[milestone_type])
 
 
+
+def get_user_shop_progress(user_id: int) -> dict:
+    """Get user's progress towards unlocking items"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get user stats
+            cur.execute(f"SELECT * FROM stats WHERE user_id = {param_style}", (user_id,))
+            stats = cur.fetchone()
+            
+            if not stats:
+                return {"total_runs": 0, "wins": 0}
+            
+            return {
+                "total_runs": stats.get("total_runs", 0),
+                "wins": stats.get("wins", 0),
+                "high_score": stats.get("high_score", 0),
+                "current_streak": stats.get("current_winning_streak", 0)
+            }
+    except Exception as e:
+        logger.error(f"Error getting shop progress: {e}")
+        return {"total_runs": 0, "wins": 0}
+
+def is_item_unlocked(user_id: int, item_id: str) -> bool:
+    """Check if an item is unlocked for the user"""
+    item = CRICKET_SHOP_ITEMS.get(item_id)
+    if not item or not item.unlock_requirement:
+        return True
+    
+    progress = get_user_shop_progress(user_id)
+    req = item.unlock_requirement
+    
+    if req["type"] == "runs":
+        return progress["total_runs"] >= req["value"]
+    elif req["type"] == "wins":
+        return progress["wins"] >= req["value"]
+    
+    return False
+
+def get_item_unlock_progress(user_id: int, item_id: str) -> dict:
+    """Get progress towards unlocking an item"""
+    item = CRICKET_SHOP_ITEMS.get(item_id)
+    if not item or not item.unlock_requirement:
+        return {"unlocked": True, "progress": 100, "remaining": 0}
+    
+    progress = get_user_shop_progress(user_id)
+    req = item.unlock_requirement
+    
+    if req["type"] == "runs":
+        current = progress["total_runs"]
+        target = req["value"]
+    elif req["type"] == "wins":
+        current = progress["wins"]
+        target = req["value"]
+    else:
+        return {"unlocked": True, "progress": 100, "remaining": 0}
+    
+    pct = min(int((current / max(target, 1)) * 100), 100)
+    remaining = max(0, target - current)
+    
+    return {
+        "unlocked": current >= target,
+        "current": current,
+        "target": target,
+        "progress": pct,
+        "remaining": remaining
+    }
+
+def generate_shop_display(user_id: int, category: str = None) -> str:
+    """Generate beautiful shop display with Telegram formatting"""
+    user_coins = _get_user_coins(user_id)
+    
+    display = (
+        f"🛒 <b>CRICKET EQUIPMENT SHOP</b>\n"
+        f"{'═'*40}\n\n"
+        f"💰 Your Coins: <b>{user_coins}</b>\n\n"
+    )
+    
+    # Group items by category
+    categories = {}
+    for item_id, item in CRICKET_SHOP_ITEMS.items():
+        if category and item.category != category:
+            continue
+        
+        if item.category not in categories:
+            categories[item.category] = []
+        categories[item.category].append((item_id, item))
+    
+    # Display each category
+    category_emojis = {
+        "equipment": "🏏",
+        "gloves": "🧤",
+        "helmets": "🪖",
+        "powerups": "⚡"
+    }
+    
+    for cat, items in categories.items():
+        display += f"{category_emojis.get(cat, '📦')} <b>{cat.upper()}</b>\n"
+        display += "─" * 40 + "\n"
+        
+        for item_id, item in items:
+            unlock_info = get_item_unlock_progress(user_id, item_id)
+            is_unlocked = unlock_info["unlocked"]
+            
+            if is_unlocked:
+                # Unlocked item - bright and colorful
+                can_afford = user_coins >= item.cost
+                afford_emoji = "✅" if can_afford else "💸"
+                
+                display += (
+                    f"\n{item.emoji} <b>{item.name}</b>\n"
+                    f"   {item.description}\n"
+                    f"   {afford_emoji} Cost: {item.cost} coins\n"
+                    f"   ✅ <b>UNLOCKED</b>\n"
+                )
+            else:
+                # Locked item - dimmed appearance
+                progress = unlock_info["progress"]
+                remaining = unlock_info["remaining"]
+                
+                # Create progress bar
+                filled = int(progress / 10)
+                empty = 10 - filled
+                progress_bar = "🟩" * filled + "🟥" * empty
+                
+                req = item.unlock_requirement
+                req_text = f"{remaining} more {'runs' if req['type'] == 'runs' else 'wins'}"
+                
+                display += (
+                    f"\n🔒 <i>{item.name}</i>\n"
+                    f"   <i>{item.description}</i>\n"
+                    f"   💰 Cost: {item.cost} coins (locked)\n"
+                    f"   📈 Progress: {progress}%\n"
+                    f"   {progress_bar}\n"
+                    f"   ⏳ Unlock: {req_text}\n"
+                )
+        
+        display += "\n"
+    
+    return display
+
+def generate_shop_keyboard(user_id: int, category: str = None):
+    """Generate inline keyboard for shop navigation"""
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    
+    # Category buttons
+    categories = [
+        ("🏏 Equipment", "shop_equipment"),
+        ("🧤 Gloves", "shop_gloves"),
+        ("🪖 Helmets", "shop_helmets"),
+        ("⚡ Power-ups", "shop_powerups"),
+        ("👁️ All Items", "shop_all")
+    ]
+    
+    for text, callback in categories:
+        kb.add(types.InlineKeyboardButton(text, callback_data=callback))
+    
+    kb.add(types.InlineKeyboardButton("🏠 Back", callback_data="main_menu"))
+    
+    return kb
+
+def send_shop_menu(chat_id: int, user_id: int, category: str = None):
+    """Send shop menu to user"""
+    try:
+        display = generate_shop_display(user_id, category)
+        kb = generate_shop_keyboard(user_id, category)
+        
+        bot.send_message(
+            chat_id,
+            display,
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+    except Exception as e:
+        logger.error(f"Error sending shop menu: {e}")
+
+
+def generate_item_detail_view(user_id: int, item_id: str) -> str:
+    """Generate detailed view of an item with purchase/unlock info"""
+    item = CRICKET_SHOP_ITEMS.get(item_id)
+    if not item:
+        return "❌ Item not found"
+    
+    unlock_info = get_item_unlock_progress(user_id, item_id)
+    user_coins = _get_user_coins(user_id)
+    
+    detail = (
+        f"{'═'*50}\n"
+        f"{item.emoji} <b>{item.name}</b>\n"
+        f"{'═'*50}\n\n"
+    )
+    
+    detail += f"📝 <b>Description:</b> {item.description}\n"
+    detail += f"🏷️ <b>Category:</b> {item.category.upper()}\n"
+    detail += f"💰 <b>Price:</b> {item.cost} coins\n\n"
+    
+    if unlock_info["unlocked"]:
+        detail += "<b>✅ STATUS: UNLOCKED</b>\n\n"
+        
+        can_afford = user_coins >= item.cost
+        if can_afford:
+            detail += (
+                f"🟢 <b>Ready to Purchase!</b>\n"
+                f"You have {user_coins} coins"
+            )
+        else:
+            need = item.cost - user_coins
+            detail += (
+                f"🟡 <b>Need More Coins</b>\n"
+                f"You have: {user_coins} coins\n"
+                f"You need: {need} more coins"
+            )
+    else:
+        detail += (
+            f"🔒 <b>STATUS: LOCKED</b>\n\n"
+            f"<b>Unlock Requirement:</b>\n"
+        )
+        
+        req = item.unlock_requirement
+        remaining = unlock_info["remaining"]
+        progress = unlock_info["progress"]
+        
+        if req["type"] == "runs":
+            detail += f"🏏 Score {remaining} more runs\n"
+        elif req["type"] == "wins":
+            detail += f"🏆 Win {remaining} more matches\n"
+        
+        # Progress bar with colors
+        filled = int(progress / 10)
+        empty = 10 - filled
+        
+        if progress < 30:
+            bar = "🔴" * filled + "⚪" * empty
+        elif progress < 70:
+            bar = "🟡" * filled + "⚪" * empty
+        else:
+            bar = "🟢" * filled + "⚪" * empty
+        
+        detail += (
+            f"\n{bar}\n"
+            f"{progress}% Unlocked"
+        )
+    
+    detail += f"\n{'═'*50}"
+    return detail
+
+
+def send_item_detail(chat_id: int, user_id: int, item_id: str):
+    """Send detailed item view with purchase button"""
+    try:
+        detail_text = generate_item_detail_view(user_id, item_id)
+        unlock_info = get_item_unlock_progress(user_id, item_id)
+        user_coins = _get_user_coins(user_id)
+        item = CRICKET_SHOP_ITEMS.get(item_id)
+        
+        kb = types.InlineKeyboardMarkup()
+        
+        if unlock_info["unlocked"] and user_coins >= item.cost:
+            kb.add(
+                types.InlineKeyboardButton(
+                    f"💳 Buy for {item.cost}", 
+                    callback_data=f"buy_item_{item_id}"
+                )
+            )
+        
+        kb.add(
+            types.InlineKeyboardButton("🛒 Back to Shop", callback_data="shop_all"),
+            types.InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
+        )
+        
+        bot.send_message(chat_id, detail_text, parse_mode="HTML", reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error sending item detail: {e}")
+
+
+def generate_visual_shop_grid(user_id: int) -> str:
+    """Create a grid-like visual shop display"""
+    user_coins = _get_user_coins(user_id)
+    
+    display = (
+        f"🛒 <b>═══════ CRICKET SHOP ═══════</b>\n"
+        f"💰 Coins: <b>{user_coins}</b>\n"
+        f"{'═'*50}\n\n"
+    )
+    
+    # Group by category and display as sections
+    categories = {}
+    for item_id, item in CRICKET_SHOP_ITEMS.items():
+        if item.category not in categories:
+            categories[item.category] = []
+        categories[item.category].append((item_id, item))
+    
+    for category, items in categories.items():
+        category_icon = {
+            "equipment": "🏏",
+            "gloves": "🧤",
+            "helmets": "🪖",
+            "powerups": "⚡"
+        }.get(category, "📦")
+        
+        display += f"<b>{category_icon} {category.upper()}</b>\n"
+        
+        for item_id, item in items:
+            unlock_info = get_item_unlock_progress(user_id, item_id)
+            
+            if unlock_info["unlocked"]:
+                # Unlocked: Show in bright colors
+                can_afford = user_coins >= item.cost
+                status = "✅ 💰" if can_afford else "✅ 💸"
+                
+                display += (
+                    f"  {status} {item.emoji} <b>{item.name}</b>\n"
+                    f"     {item.description}\n"
+                    f"     💵 {item.cost} coins\n"
+                )
+            else:
+                # Locked: Show faded with progress
+                progress = unlock_info["progress"]
+                
+                # Use different visual for different progress stages
+                if progress == 0:
+                    lock_visual = "🔴🔒"
+                elif progress < 33:
+                    lock_visual = "🟠🔒"
+                elif progress < 66:
+                    lock_visual = "🟡🔒"
+                else:
+                    lock_visual = "🟢🔒"
+                
+                display += (
+                    f"  {lock_visual} <i>{item.name}</i>\n"
+                    f"     <i>{item.description}</i>\n"
+                    f"     {progress}% unlocked • "
+                )
+                
+                req = item.unlock_requirement
+                if req["type"] == "runs":
+                    display += f"{unlock_info['remaining']} more runs\n"
+                else:
+                    display += f"{unlock_info['remaining']} more wins\n"
+        
+        display += "\n"
+    
+    display += f"{'═'*50}"
+    return display
+
+
 def generate_live_scorecard(game: GameState) -> str:
     """Create detailed live scorecard"""
     batting = game.data.get('batting')
@@ -4627,30 +5143,6 @@ def check_powerplay_status(g: Dict[str, Any]) -> bool:
         return True
     return False
 
-def check_innings_end(g: Dict[str, Any]) -> dict:
-    """Check if innings should end - FIXED VERSION"""
-    current_batting = g["batting"]
-    
-    # Check wickets first
-    if current_batting == "player":
-        if g["player_wkts"] >= g["wickets_limit"]:
-            return {'innings_end': True, 'reason': 'all_out'}
-    else:
-        if g["bot_wkts"] >= g["wickets_limit"]:
-            return {'innings_end': True, 'reason': 'all_out'}
-    
-    # Check overs - MUST complete full over (6 balls)
-    if g["overs_bowled"] >= g["overs_limit"] and g["balls_in_over"] == 0:
-        return {'innings_end': True, 'reason': 'overs_complete'}
-    
-    # Check target in second innings - FIXED: Only end if target is EXCEEDED
-    if g["innings"] == 2 and g.get("target"):
-        current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
-        if current_score >= g["target"]:  # Changed from >= to >
-            return {'innings_end': True, 'reason': 'target_achieved'}
-    
-    return {'innings_end': False, 'reason': None}
-
 def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
     """Enhanced version with tournament and challenge integration - FIXED"""
     if not (1 <= user_value <= 6):
@@ -4784,25 +5276,20 @@ def check_innings_end(g: Dict[str, Any]) -> dict:
     # Check wickets first
     if current_batting == "player":
         if g["player_wkts"] >= g["wickets_limit"]:
-            logger.info(f"Innings end: Player all out ({g['player_wkts']}/{g['wickets_limit']})")
             return {'innings_end': True, 'reason': 'all_out'}
     else:
         if g["bot_wkts"] >= g["wickets_limit"]:
-            logger.info(f"Innings end: Bot all out ({g['bot_wkts']}/{g['wickets_limit']})")
             return {'innings_end': True, 'reason': 'all_out'}
     
     # Check overs - MUST complete full over (6 balls)
     if g["overs_bowled"] >= g["overs_limit"] and g["balls_in_over"] == 0:
-        logger.info(f"Innings end: Overs complete ({g['overs_bowled']}/{g['overs_limit']})")
         return {'innings_end': True, 'reason': 'overs_complete'}
     
-    # Check target in second innings
+    # Check target in second innings - END IMMEDIATELY when exceeded
     if g["innings"] == 2 and g.get("target"):
         current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
-        logger.info(f"2nd innings check: current={current_score}, target={g['target']}")
-        
-        if current_score >= g["target"]:
-            logger.info(f"Innings end: Target achieved ({current_score} >= {g['target']})")
+        # CRITICAL: Use > not >= to end on next delivery after exceeding target
+        if current_score > g["target"]:  # Changed from >=
             return {'innings_end': True, 'reason': 'target_achieved'}
     
     return {'innings_end': False, 'reason': None}
@@ -6129,6 +6616,62 @@ def handle_forfeit_request(message: types.Message):
         logger.error(f"Error handling forfeit request: {e}")
         bot.send_message(message.chat.id, "❌ Error processing your request.")
 
+@bot.message_handler(commands=['addcoins'])
+def cmd_add_coins(message):
+    """Admin command to add coins to user"""
+    try:
+        if message.from_user.id not in ADMIN_IDS:
+            bot.send_message(message.chat.id, "❌ Admin access required.")
+            return
+        
+        parts = message.text.split()
+        if len(parts) < 3:
+            bot.send_message(
+                message.chat.id,
+                "Usage: /addcoins <user_id> <amount>\n"
+                "Example: /addcoins 123456789 1000"
+            )
+            return
+        
+        try:
+            user_id = int(parts[1])
+            amount = int(parts[2])
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ User ID and amount must be numbers")
+            return
+        
+        # Ensure user exists first
+        ensure_user_exists(user_id, None, None)
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                cur.execute(
+                    "UPDATE users SET coins = coins + %s WHERE user_id = %s",
+                    (amount, user_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                    (amount, user_id)
+                )
+        
+        success_msg = (
+            f"✅ <b>Coins Added</b>\n\n"
+            f"User ID: {user_id}\n"
+            f"Amount Added: +{amount} coins\n"
+            f"Admin: {message.from_user.first_name}"
+        )
+        
+        bot.send_message(message.chat.id, success_msg)
+        logger.info(f"Admin {message.from_user.id} added {amount} coins to user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Error adding coins: {e}")
+        bot.send_message(message.chat.id, "❌ Error adding coins")
+
 
 # Callback handlers
 @bot.callback_query_handler(func=lambda call: True)
@@ -6634,6 +7177,110 @@ def handle_challenges_view(call):
         bot.answer_callback_query(call.id, "Error loading challenges")
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('item_detail_'))
+@rate_limit_check('callback')
+def handle_item_detail(call):
+    """Show item details"""
+    try:
+        item_id = call.data.replace('item_detail_', '')
+        send_item_detail(call.message.chat.id, call.from_user.id, item_id)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing item detail: {e}")
+        bot.answer_callback_query(call.id, "Error loading item")
+
+
+# Add callback for purchasing items
+@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_item_'))
+@rate_limit_check('callback')
+def handle_item_purchase(call):
+    """Handle item purchase"""
+    try:
+        item_id = call.data.replace('buy_item_', '')
+        item = CRICKET_SHOP_ITEMS.get(item_id)
+        
+        if not item:
+            bot.answer_callback_query(call.id, "Item not found", show_alert=True)
+            return
+        
+        user_coins = _get_user_coins(call.from_user.id)
+        
+        if user_coins < item.cost:
+            bot.answer_callback_query(
+                call.id,
+                f"❌ Not enough coins! Need {item.cost - user_coins} more",
+                show_alert=True
+            )
+            return
+        
+        # Deduct coins
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                cur.execute(
+                    "UPDATE users SET coins = coins - %s WHERE user_id = %s",
+                    (item.cost, call.from_user.id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE users SET coins = coins - ? WHERE user_id = ?",
+                    (item.cost, call.from_user.id)
+                )
+        
+        # Add to inventory
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                now = datetime.now(timezone.utc).isoformat()
+                
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO user_inventory (user_id, item_type, item_id, quantity, acquired_at)
+                        VALUES (%s, %s, %s, 1, %s)
+                        ON CONFLICT (user_id, item_type, item_id)
+                        DO UPDATE SET quantity = user_inventory.quantity + 1
+                    """, (call.from_user.id, item.category, item_id, now))
+                else:
+                    # Check if exists
+                    cur.execute("""
+                        SELECT quantity FROM user_inventory 
+                        WHERE user_id = ? AND item_type = ? AND item_id = ?
+                    """, (call.from_user.id, item.category, item_id))
+                    
+                    row = cur.fetchone()
+                    if row:
+                        cur.execute("""
+                            UPDATE user_inventory SET quantity = quantity + 1
+                            WHERE user_id = ? AND item_type = ? AND item_id = ?
+                        """, (call.from_user.id, item.category, item_id))
+                    else:
+                        cur.execute("""
+                            INSERT INTO user_inventory (user_id, item_type, item_id, quantity, acquired_at)
+                            VALUES (?, ?, ?, 1, ?)
+                        """, (call.from_user.id, item.category, item_id, now))
+        except Exception as e:
+            logger.error(f"Error adding to inventory: {e}")
+        
+        # Show purchase success
+        purchase_msg = (
+            f"✅ <b>PURCHASE SUCCESSFUL!</b>\n\n"
+            f"{item.emoji} {item.name}\n"
+            f"added to your inventory!\n\n"
+            f"💰 Cost: {item.cost} coins\n"
+            f"💵 Remaining: {user_coins - item.cost} coins"
+        )
+        
+        bot.answer_callback_query(call.id, "✅ Item purchased!", show_alert=False)
+        bot.send_message(call.message.chat.id, purchase_msg, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Error purchasing item: {e}")
+        bot.answer_callback_query(call.id, "Error purchasing item")
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('shot_'))
 @rate_limit_check('callback')
 def handle_shot_selection(call):
@@ -7004,6 +7651,40 @@ def cmd_profile(message):
             
     except Exception as e:
         logger.error(f"Error in profile command: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('shop_'))
+@rate_limit_check('callback')
+def handle_shop_callback(call):
+    """Handle shop category selection"""
+    try:
+        category_map = {
+            'shop_equipment': 'equipment',
+            'shop_gloves': 'gloves',
+            'shop_helmets': 'helmets',
+            'shop_powerups': 'powerups',
+            'shop_all': None
+        }
+        
+        category = category_map.get(call.data)
+        send_shop_menu(call.message.chat.id, call.from_user.id, category)
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Error in shop callback: {e}")
+        bot.answer_callback_query(call.id, "Error loading shop")
+
+# Add command to view shop
+@bot.message_handler(commands=['shop'])
+@rate_limit_check('command')
+def cmd_shop(message):
+    """Show the shop"""
+    try:
+        ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        send_shop_menu(message.chat.id, message.from_user.id)
+    except Exception as e:
+        logger.error(f"Error in shop command: {e}")
+        bot.reply_to(message, "❌ Error opening shop")
 
 
 @bot.message_handler(commands=['replay'])

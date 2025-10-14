@@ -3326,7 +3326,7 @@ class AchievementSystem:
         return display
     
 def create_additional_tables():
-    """Create tables for new features"""
+    """Create tables for new features - FIXED TO ENSURE user_inventory IS CREATED"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -3347,7 +3347,23 @@ def create_additional_tables():
                 text_type = "TEXT"
                 timestamp_type = "TEXT"
             
-            # User achievements table
+            # 1. User inventory table - MUST BE FIRST
+            logger.info("Creating user_inventory table...")
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS user_inventory (
+                    id {autoincrement},
+                    user_id {bigint} NOT NULL,
+                    item_type {text_type} NOT NULL,
+                    item_id {text_type} NOT NULL,
+                    quantity INTEGER DEFAULT 1,
+                    acquired_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, item_type, item_id)
+                )
+            """)
+            logger.info("✓ user_inventory table created")
+            
+            # 2. User achievements table
+            logger.info("Creating user_achievements table...")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS user_achievements (
                     id {autoincrement},
@@ -3357,8 +3373,10 @@ def create_additional_tables():
                     UNIQUE(user_id, achievement_id)
                 )
             """)
+            logger.info("✓ user_achievements table created")
             
-            # Match analytics table
+            # 3. Match analytics table
+            logger.info("Creating match_analytics table...")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS match_analytics (
                     id {autoincrement},
@@ -3375,8 +3393,10 @@ def create_additional_tables():
                     created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            logger.info("✓ match_analytics table created")
             
-            # Leaderboards table
+            # 4. Leaderboards table
+            logger.info("Creating leaderboards table...")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS leaderboards (
                     id {autoincrement},
@@ -3387,21 +3407,10 @@ def create_additional_tables():
                     UNIQUE(category, user_id)
                 )
             """)
+            logger.info("✓ leaderboards table created")
             
-            # User inventory/items table
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS user_inventory (
-                    id {autoincrement},
-                    user_id {bigint} NOT NULL,
-                    item_type {text_type} NOT NULL,
-                    item_id {text_type} NOT NULL,
-                    quantity INTEGER DEFAULT 1,
-                    acquired_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(user_id, item_type, item_id)
-                )
-            """)
-            
-            # Power-ups table
+            # 5. Power-ups table
+            logger.info("Creating powerups table...")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS powerups (
                     id {autoincrement},
@@ -3413,8 +3422,10 @@ def create_additional_tables():
                     cost INTEGER DEFAULT 0
                 )
             """)
+            logger.info("✓ powerups table created")
             
-            # User friends/social table
+            # 6. User friends/social table
+            logger.info("Creating user_friends table...")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS user_friends (
                     user_id {bigint} NOT NULL,
@@ -3423,9 +3434,11 @@ def create_additional_tables():
                     created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (user_id, friend_id)
                 )
-            """)    
+            """)
+            logger.info("✓ user_friends table created")
             
-            # Match replays table
+            # 7. Match replays table
+            logger.info("Creating match_replays table...")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS match_replays (
                     id {autoincrement},
@@ -3436,10 +3449,14 @@ def create_additional_tables():
                     created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            logger.info("✓ match_replays table created")
             
-            logger.info("Additional tables created successfully")
+            logger.info("✅ All additional tables created successfully")
+            return True
+            
     except Exception as e:
-        logger.error(f"Error creating additional tables: {e}")
+        logger.error(f"Error creating additional tables: {e}", exc_info=True)
+        return False
 
 
 

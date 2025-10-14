@@ -4646,7 +4646,7 @@ def check_innings_end(g: Dict[str, Any]) -> dict:
     # Check target in second innings - FIXED: Only end if target is EXCEEDED
     if g["innings"] == 2 and g.get("target"):
         current_score = g["player_score"] if current_batting == "player" else g["bot_score"]
-        if current_score > g["target"]:  # Changed from >= to >
+        if current_score >= g["target"]:  # Changed from >= to >
             return {'innings_end': True, 'reason': 'target_achieved'}
     
     return {'innings_end': False, 'reason': None}
@@ -6375,7 +6375,7 @@ def handle_toss_callback(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('info_powerup_'))
 @rate_limit_check('callback')
 def handle_powerup_info(call):
-    """Show power-up information"""
+    """Show detailed power-up information"""
     try:
         powerup_id = call.data.replace('info_powerup_', '')
         
@@ -6384,17 +6384,26 @@ def handle_powerup_info(call):
             return
         
         powerup = PowerUp.POWERUPS[powerup_id]
+        user_coins = _get_user_coins(call.from_user.id)
+        can_afford = user_coins >= powerup['cost']
         
         info_text = (
-            f"{powerup['name']}\n\n"
-            f"📝 {powerup['description']}\n\n"
+            f"<b>{powerup['name']}</b>\n\n"
+            f"📝 Description:\n{powerup['description']}\n\n"
             f"⏱️ Duration: {powerup['duration']} over(s)\n"
             f"💰 Cost: {powerup['cost']} coins\n\n"
-            f"Effect: {powerup['effect']['type'].replace('_', ' ').title()}\n"
-            f"Value: +{int(powerup['effect']['value'] * 100)}%"
+            f"🎯 Effect:\n"
+            f"Type: {powerup['effect']['type'].replace('_', ' ').title()}\n"
+            f"Boost: +{int(powerup['effect']['value'] * 100)}%\n\n"
         )
         
-        bot.answer_callback_query(call.id, info_text, show_alert=True)
+        if can_afford:
+            info_text += f"✅ You have {user_coins} coins - Can purchase!"
+        else:
+            info_text += f"🔒 You have {user_coins} coins - Need {powerup['cost'] - user_coins} more"
+        
+        bot.send_message(call.message.chat.id, info_text, parse_mode="HTML")
+        bot.answer_callback_query(call.id)
         
     except Exception as e:
         logger.error(f"Error showing powerup info: {e}")
@@ -6687,31 +6696,48 @@ def simulate_player_ball(game: GameState, aggression: float) -> dict:
 @bot.message_handler(commands=['powerups'])
 @rate_limit_check('command')
 def cmd_powerups(message):
-    """Show power-ups shop"""
+    """Show power-ups shop - FIXED with descriptions and coin checks"""
     try:
         user_coins = _get_user_coins(message.from_user.id)
         
         shop_text = (
-            "🛒 POWER-UPS SHOP\n\n"
+            "🛒 <b>POWER-UPS SHOP</b>\n"
+            f"💰 Your Balance: <b>{user_coins} coins</b>\n\n"
             "Purchase power-ups to gain advantages in matches!\n\n"
         )
         
         for powerup_id, powerup in PowerUp.POWERUPS.items():
+            cost = powerup['cost']
+            can_afford = user_coins >= cost
+            status = "✅" if can_afford else "🔒"
+            
             shop_text += (
-                f"{powerup['name']}\n"
-                f"  {powerup['description']}\n"
-                f"  Duration: {powerup['duration']} over(s) | Cost: {powerup['cost']} coins\n\n"
+                f"{status} <b>{powerup['name']}</b>\n"
+                f"   {powerup['description']}\n"
+                f"   ⏱️ Duration: {powerup['duration']} over(s)\n"
+                f"   💰 Cost: {cost} coins "
             )
+            
+            if not can_afford:
+                shop_text += f"(Need {cost - user_coins} more)\n\n"
+            else:
+                shop_text += "\n\n"
         
-        shop_text += f"💰 Your coins: {user_coins}"
+        shop_text += (
+            f"{'─'*40}\n"
+            "💡 Tip: Win matches to earn coins!\n"
+            "🎯 Complete daily challenges for bonus coins!"
+        )
         
         bot.send_message(
             message.chat.id,
             shop_text,
+            parse_mode="HTML",
             reply_markup=kb_powerups_shop()
         )
     except Exception as e:
         logger.error(f"Error in powerups command: {e}")
+        bot.reply_to(message, "❌ Error loading power-ups shop")
 
 
 
@@ -6904,7 +6930,7 @@ def cmd_profile(message):
 @bot.message_handler(commands=['replay'])
 @rate_limit_check('command')
 def cmd_replay(message):
-    """Show last match replay/summary with ball-by-ball"""
+    """Show last match replay/summary - FIXED VERSION"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -6922,72 +6948,35 @@ def cmd_replay(message):
             last_match = cur.fetchone()
             
             if not last_match:
-                bot.reply_to(message, "No match history found!")
+                bot.reply_to(message, "📊 No match history found!\n\nPlay your first match with /play")
                 return
             
-            # Get ball-by-ball data if exists
-            cur.execute(f"""
-                SELECT * FROM match_replays
-                WHERE match_id = {param_style}
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (str(last_match['id']),))
+            # Build replay display - FIXED with safe access
+            created_at = last_match.get('created_at', 'Unknown')
+            if created_at != 'Unknown':
+                created_at = str(created_at)[:19]
             
-            replay_data = cur.fetchone()
-            
-            # Build replay display
             replay = (
                 f"{'🎬'*15}\n"
                 f"  MATCH REPLAY\n"
                 f"{'🎬'*15}\n\n"
-                f"📅 Date: {last_match['created_at'][:19]}\n"
-                f"📋 Format: <b>{last_match['match_format']}</b>\n\n"
-            )
-            
-            # Show ball-by-ball if available
-            if replay_data and replay_data.get('ball_by_ball'):
-                try:
-                    ball_by_ball = json.loads(replay_data['ball_by_ball'])
-                    
-                    replay += f"{'─'*40}\n"
-                    replay += "📊 BALL-BY-BALL BREAKDOWN\n"
-                    replay += f"{'─'*40}\n\n"
-                    
-                    for over_num, over_data in enumerate(ball_by_ball, 1):
-                        replay += f"<b>Over {over_num}:</b> "
-                        balls = over_data.get('balls', [])
-                        
-                        for ball in balls:
-                            if ball == 'W':
-                                replay += "W "
-                            elif ball == 0:
-                                replay += "• "
-                            else:
-                                replay += f"{ball} "
-                        
-                        replay += f"({over_data.get('runs', 0)} runs)\n"
-                    
-                    replay += "\n"
-                except:
-                    pass
-            
-            # Match summary
-            replay += (
+                f"📅 Date: {created_at}\n"
+                f"📋 Format: <b>{last_match.get('match_format', 'T2')}</b>\n\n"
                 f"{'─'*40}\n"
                 f"🏏 <b>YOUR INNINGS</b>\n"
                 f"{'─'*40}\n"
-                f"Score: <b>{last_match['player_score']}/{last_match['player_wickets']}</b>\n"
-                f"Overs: {last_match['overs_played']:.1f}\n"
-                f"Strike Rate: {last_match['player_strike_rate']:.1f}\n\n"
+                f"Score: <b>{last_match.get('player_score', 0)}/{last_match.get('player_wickets', 0)}</b>\n"
+                f"Overs: {last_match.get('overs_played', 0):.1f}\n"
+                f"Strike Rate: {last_match.get('player_strike_rate', 0):.1f}\n\n"
                 f"{'─'*40}\n"
                 f"🤖 <b>BOT INNINGS</b>\n"
                 f"{'─'*40}\n"
-                f"Score: <b>{last_match['bot_score']}/{last_match['bot_wickets']}</b>\n\n"
+                f"Score: <b>{last_match.get('bot_score', 0)}/{last_match.get('bot_wickets', 0)}</b>\n\n"
                 f"{'═'*40}\n"
             )
             
-            result = last_match['result']
-            margin = last_match['margin']
+            result = last_match.get('result', 'unknown')
+            margin = last_match.get('margin', '')
             
             if result == 'win':
                 replay += f"🏆 <b>YOU WON</b> by {margin}!\n"
@@ -6997,13 +6986,13 @@ def cmd_replay(message):
                 replay += f"🤝 <b>MATCH TIED!</b>\n"
             
             replay += f"{'═'*40}\n"
-            replay += f"⏱️ Duration: {last_match['match_duration_minutes']} minutes"
+            replay += f"⏱️ Duration: {last_match.get('match_duration_minutes', 5)} minutes"
             
             bot.send_message(message.chat.id, replay, parse_mode="HTML")
             
     except Exception as e:
-        logger.error(f"Error in replay command: {e}")
-        bot.reply_to(message, "❌ Error loading replay")
+        logger.error(f"Error in replay command: {e}", exc_info=True)
+        bot.reply_to(message, "❌ Error loading replay. Please try again.")
 
 
 @bot.message_handler(commands=['daily'])
@@ -7886,7 +7875,38 @@ def handle_match_completion(chat_id: int, user_id: int, game: GameState):
             result_text = "🤝 MATCH TIED!"
         
         # Award coins
-        _award_coins(user_id, coins_reward)
+        # Award coins - FIXED
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                is_postgres = bool(os.getenv("DATABASE_URL"))
+                
+                # First ensure user exists
+                param_style = "%s" if is_postgres else "?"
+                cur.execute(f"SELECT user_id, coins FROM users WHERE user_id = {param_style}", (user_id,))
+                user = cur.fetchone()
+                
+                if user:
+                    old_coins = user['coins']
+                    new_coins = old_coins + coins_reward
+                    
+                    if is_postgres:
+                        cur.execute("UPDATE users SET coins = %s WHERE user_id = %s", (new_coins, user_id))
+                    else:
+                        cur.execute("UPDATE users SET coins = ? WHERE user_id = ?", (new_coins, user_id))
+                    
+                    logger.info(f"✓ Awarded {coins_reward} coins to user {user_id} (old: {old_coins}, new: {new_coins})")
+                else:
+                    logger.error(f"User {user_id} not found in database!")
+                    # Create user if not exists
+                    ensure_user_exists(user_id, None, None)
+                    # Try awarding again
+                    if is_postgres:
+                        cur.execute("UPDATE users SET coins = coins + %s WHERE user_id = %s", (coins_reward, user_id))
+                    else:
+                        cur.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (coins_reward, user_id))
+        except Exception as e:
+            logger.error(f"Error awarding coins: {e}")
         
         # Calculate and award XP
         xp_earned = UserLevelManager.calculate_match_xp(game.data, result)

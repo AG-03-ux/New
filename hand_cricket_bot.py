@@ -27,6 +27,11 @@ from enum import Enum
 import os
 from pathlib import Path
 import time
+import schedule
+from collections import deque
+import uuid
+from pathlib import Path
+
 
 
 # Load environment variables first
@@ -103,7 +108,7 @@ import logging.config
 logger = logging.getLogger('cricket-bot')
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(levelname)s] %(asctime)s - %(message)s',
+    format='[%(levelname)s] %(asctime)s - %(name)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler('cricket_bot.log')
@@ -125,11 +130,10 @@ if not TOKEN:
 try:
     bot = telebot.TeleBot(TOKEN, parse_mode="HTML", threaded=False)
     bot_info = bot.get_me()
-    logger.info(f"Bot initialized: @{bot_info.username} (ID: {bot_info.id})")
+    logger.info(f"✓ Bot initialized: @{bot_info.username} (ID: {bot_info.id})")
 except Exception as e:
-    logger.error(f"Bot initialization failed: {e}")
-    raise RuntimeError("Cannot initialize bot - check your TOKEN")
-
+    logger.error(f"✗ Bot initialization failed: {e}")
+    raise RuntimeError(f"Cannot initialize bot - check your TOKEN: {e}")
 
 # Log all registered handlers for debugging
 logger.info(f"Total message handlers registered: {len(bot.message_handlers)}")
@@ -307,33 +311,39 @@ def rate_limit_check(action_type: str = 'default'):
         def wrapper(*args, **kwargs):
             user_id = None
             
-            # Better user ID extraction
+            # Extract user_id safely
             if args:
-                if hasattr(args[0], 'from_user') and args[0].from_user:
-                    user_id = args[0].from_user.id
-                elif hasattr(args[0], 'message') and hasattr(args[0].message, 'from_user'):
-                    user_id = args[0].message.from_user.id
-                elif isinstance(args[0], int):
-                    user_id = args[0]
+                arg = args[0]
+                if hasattr(arg, 'from_user') and arg.from_user:
+                    user_id = arg.from_user.id
+                elif hasattr(arg, 'message') and hasattr(arg.message, 'from_user'):
+                    user_id = arg.message.from_user.id
+                elif isinstance(arg, int):
+                    user_id = arg
             
-            if user_id and not rate_limiter.is_allowed(user_id, action_type):
+            # Skip rate limiting if no user_id found
+            if not user_id:
+                return func(*args, **kwargs)
+            
+            if not rate_limiter.is_allowed(user_id, action_type):
                 wait_time = rate_limiter.get_wait_time(user_id, action_type)
                 logger.warning(f"Rate limit exceeded for user {user_id}, action {action_type}")
                 
-                # Better error handling
-                if hasattr(args[0], 'answer_callback_query'):
-                    # For callback queries
-                    args[0].answer_callback_query(
-                        f"⏱️ Please wait {wait_time:.1f} seconds before trying again.",
-                        show_alert=True
-                    )
-                elif hasattr(args[0], 'chat') and hasattr(args[0].chat, 'id'):
-                    # For messages
-                    bot.send_message(
-                        args[0].chat.id,
-                        f"⏱️ Please wait {wait_time:.1f} seconds before trying again."
-                    )
-                return None  # This is OK as handlers check for None
+                # Try to send error message
+                try:
+                    if hasattr(args[0], 'answer_callback_query'):
+                        args[0].answer_callback_query(
+                            f"⏱️ Please wait {wait_time:.1f} seconds.",
+                            show_alert=True
+                        )
+                    elif hasattr(args[0], 'chat'):
+                        bot.send_message(
+                            args[0].chat.id,
+                            f"⏱️ Please wait {wait_time:.1f} seconds."
+                        )
+                except:
+                    pass
+                return None
             
             return func(*args, **kwargs)
         return wrapper
@@ -1593,6 +1603,7 @@ class GameState:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
         self.data = self._load_or_create()
+        self.data['chat_id'] = chat_id
     
     def _load_or_create(self) -> Dict[str, Any]:
         try:
@@ -3966,6 +3977,7 @@ def announce_new_tournament(tournament_id: int):
 
 # ADD THESE NEW KEYBOARD FUNCTIONS:
 def kb_tournament_menu() -> types.InlineKeyboardMarkup:
+    """Tournament menu keyboard"""
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("🏆 Join Tournament", callback_data="tournament_list"),
@@ -4142,28 +4154,29 @@ def generate_tournament_bracket(tournament: EliteTournament) -> str:
 
 # ADD THESE DISPLAY FUNCTIONS:
 def handle_tournament_menu(chat_id: int, user_id: int):
-    """Show tournament main menu"""
-    menu_text = (
-        "🏆 TOURNAMENT HUB 🏆\n\n"
-        "Choose an option:\n"
-        "🎯 Join Tournament\n"
-        "➕ Create Tournament\n"
-        "📊 View Tournaments\n"
-        "🥇 Rankings\n"
-    )
-    
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🎯 Join", callback_data="tournament_join"),
-        types.InlineKeyboardButton("➕ Create", callback_data="tournament_create")
-    )
-    kb.add(
-        types.InlineKeyboardButton("📊 View", callback_data="tournament_list"),
-        types.InlineKeyboardButton("🥇 Rankings", callback_data="tournament_rankings")
-    )
-    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
-    
-    bot.send_message(chat_id, menu_text, reply_markup=kb)
+    """Show tournament main menu - FIXED"""
+    try:
+        menu_text = (
+            "🏆 TOURNAMENT HUB 🏆\n\n"
+            "Choose an option:\n"
+        )
+        
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("🎯 Join", callback_data="tournament_join"),
+            types.InlineKeyboardButton("➕ Create", callback_data="tournament_create")
+        )
+        kb.add(
+            types.InlineKeyboardButton("📊 View", callback_data="tournament_list"),
+            types.InlineKeyboardButton("🥇 Rankings", callback_data="tournament_rankings")
+        )
+        kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="main_menu"))
+        
+        bot.send_message(chat_id, menu_text, reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error showing tournament menu: {e}")
+        bot.send_message(chat_id, "Error loading tournament menu")
 
 
 def show_all_tournaments(chat_id: int):
@@ -4456,7 +4469,11 @@ def safe_start_new_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int =
                        difficulty: str = "medium", user_id: int = None):
     try:
         g = default_game(chat_id, overs, wickets, difficulty)  # Pass chat_id
+        g['chat_id'] = chat_id
         safe_save_game(chat_id, g)
+        game_state = GameState(chat_id)
+        game_state.data = g
+        game_state.save()
         
         weather = WEATHER_CONDITIONS.get(g.get("weather_condition", "clear"), {"description": "Clear skies"})
         pitch = PITCH_CONDITIONS.get(g.get("pitch_condition", "normal"), {"description": "Normal pitch"})
@@ -5394,37 +5411,38 @@ def kb_forfeit_confirm() -> types.InlineKeyboardMarkup:
 # Stats functions
 
 def _update_tournament_in_db(tournament):
-    """Complete this function properly"""
+    """Save tournament updates to database"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             now = datetime.now(timezone.utc).isoformat()
             
+            tournament_json = json.dumps(tournament.to_dict())
+            
             if is_postgres:
                 cur.execute("""
                     UPDATE tournaments SET 
                         name = %s, status = %s, current_round = %s, 
-                        prize_pool = %s, brackets = %s, updated_at = %s
+                        brackets = %s, metadata = %s, updated_at = %s
                     WHERE id = %s
                 """, (
-                    tournament.name, tournament.tournament_state.value, tournament.current_round,
-                    tournament.prize_pool, json.dumps(tournament.brackets), now, tournament.id
+                    tournament.name, tournament.tournament_state, tournament.current_round,
+                    json.dumps(tournament.bracket), tournament_json, now, tournament.tournament_id
                 ))
             else:
                 cur.execute("""
                     UPDATE tournaments SET 
                         name = ?, status = ?, current_round = ?, 
-                        prize_pool = ?, brackets = ?, updated_at = ?
+                        brackets = ?, metadata = ?, updated_at = ?
                     WHERE id = ?
                 """, (
-                    tournament.name, tournament.tournament_state.value, tournament.current_round,
-                    tournament.prize_pool, json.dumps(tournament.brackets), now, tournament.id
+                    tournament.name, tournament.tournament_state, tournament.current_round,
+                    json.dumps(tournament.bracket), tournament_json, now, tournament.tournament_id
                 ))
                 
     except Exception as e:
-        logger.error(f"Error updating tournament in database: {e}")
-        raise
+        logger.error(f"Error updating tournament: {e}")
 
 def _send_registration_confirmation(chat_id: int, user_id: int, tournament):
     """Send registration confirmation message"""
@@ -5456,7 +5474,9 @@ def _start_tournament(tournament_id: int):
 
 
 def get_param_style():
-    return "%s" if os.getenv("DATABASE_URL") else "?"
+    """Get correct parameter placeholder for current database"""
+    return "%s" if bool(os.getenv("DATABASE_URL")) else "?"
+
 
 def execute_query(cursor, query, params):
     """Execute query with proper parameter style"""
@@ -5666,49 +5686,54 @@ def ensure_user(message: types.Message):
             logger.error(f"✗ Failed to upsert user {message.from_user.id}: {e}", exc_info=True)
 
 def setup_webhook():
-    """Set up webhook with proper URL format"""
+    """Set up webhook with proper error handling"""
     try:
-        if USE_WEBHOOK and WEBHOOK_URL:
-            # Remove any existing webhook first
-            bot.remove_webhook()
-            time.sleep(1)
-            
-            # Construct proper webhook URL
-            webhook_url = WEBHOOK_URL.rstrip('/')
-            if not webhook_url.endswith(f'/webhook/{TOKEN}'):
-                webhook_url = f"{webhook_url}/webhook/{TOKEN}"
-            
-            logger.info(f"Setting webhook to: {webhook_url}")
-            
-            # Set webhook
-            result = bot.set_webhook(
-                url=webhook_url,
-                max_connections=40,
-                drop_pending_updates=True  # Clear any pending updates
-            )
-            
-            if result:
-                logger.info("Webhook set successfully")
+        if not USE_WEBHOOK or not WEBHOOK_URL:
+            logger.info("Webhook not configured, will use polling")
+            return False
+        
+        # Remove existing webhook
+        bot.remove_webhook()
+        time.sleep(1)
+        
+        # Construct proper webhook URL
+        webhook_url = WEBHOOK_URL.rstrip('/')
+        if not webhook_url.endswith(f'/webhook/{TOKEN}'):
+            webhook_url = f"{webhook_url}/webhook/{TOKEN}"
+        
+        logger.info(f"Setting webhook to: {webhook_url}")
+        
+        # Set webhook with retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = bot.set_webhook(
+                    url=webhook_url,
+                    max_connections=40,
+                    drop_pending_updates=True
+                )
                 
-                # Verify
-                info = bot.get_webhook_info()
-                logger.info(f"Webhook verified: {info.url}")
-                logger.info(f"Pending updates: {info.pending_update_count}")
-                
-                if info.last_error_message:
-                    logger.error(f"Webhook error: {info.last_error_message}")
-                    return False
-                
-                return True
-            else:
-                logger.error("Failed to set webhook")
-                return False
+                if result:
+                    # Verify
+                    info = bot.get_webhook_info()
+                    if info.url == webhook_url:
+                        logger.info("✓ Webhook set successfully")
+                        return True
+                    else:
+                        logger.error(f"Webhook verification failed. Expected: {webhook_url}, Got: {info.url}")
+                        
+            except Exception as e:
+                logger.error(f"Webhook setup attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    raise
+        
+        return False
                 
     except Exception as e:
-        logger.error(f"Error setting webhook: {e}", exc_info=True)
+        logger.error(f"Fatal webhook setup error: {e}", exc_info=True)
         return False
-    
-    return False
 # Message handlers
 @bot.message_handler(commands=['start'])
 @check_ban
@@ -6126,6 +6151,40 @@ def handle_challenges_claim_callback(call):
 def handle_challenges_history_callback(call):
     show_challenge_history(call.message.chat.id, call.from_user.id)
     bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ["toss_heads", "toss_tails"])
+@rate_limit_check('callback')
+def handle_toss_callback(call):
+    """Handle toss selection"""
+    try:
+        user_id = call.from_user.id
+        chat_id = call.message.chat.id
+        choice = call.data.split("_")[1]
+        
+        bot.answer_callback_query(call.id, f"You chose {choice}!")
+        handle_toss_result(chat_id, choice, user_id)
+        
+    except Exception as e:
+        logger.error(f"Error in toss callback: {e}")
+        bot.answer_callback_query(call.id, "Error processing toss")
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ["choose_bat", "choose_bowl"])
+@rate_limit_check('callback')
+def handle_bat_bowl_callback(call):
+    """Handle bat/bowl choice after winning toss"""
+    try:
+        chat_id = call.message.chat.id
+        choice = "player" if call.data == "choose_bat" else "bot"
+        
+        bot.answer_callback_query(call.id, "Starting match...")
+        safe_set_batting_order(chat_id, choice)
+        
+    except Exception as e:
+        logger.error(f"Error in bat/bowl callback: {e}")
+        bot.answer_callback_query(call.id, "Error starting match")
+
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_powerup_'))
@@ -7073,6 +7132,42 @@ def handle_start_second_innings(call):
         bot.answer_callback_query(call.id, "Error starting innings")
 
 
+
+@bot.callback_query_handler(func=lambda call: call.data == 'tournament_join')
+def handle_tournament_join(call):
+    """Show available tournaments to join"""
+    show_all_tournaments(call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('tourn_start_'))
+def handle_tournament_start(call):
+    """Start tournament if creator"""
+    try:
+        tournament_id = call.data.split('_')[2]
+        tournament = load_tournament_from_db(tournament_id)
+        
+        if tournament and tournament.created_by == call.from_user.id:
+            if len(tournament.participants) < 2:
+                bot.answer_callback_query(call.id, "Need at least 2 players!", show_alert=True)
+                return
+            
+            result = tournament.start_tournament()
+            if result['success']:
+                save_tournament_to_db(tournament)
+                bot.send_message(
+                    call.message.chat.id,
+                    f"🏆 Tournament Started!\n\n{result['message']}"
+                )
+            else:
+                bot.answer_callback_query(call.id, result['message'], show_alert=True)
+        else:
+            bot.answer_callback_query(call.id, "Only creator can start!", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error starting tournament: {e}")
+        bot.answer_callback_query(call.id, "Error starting tournament")
+
+
+
 @bot.callback_query_handler(func=lambda call: call.data == 'help')
 def handle_help_callback(call):
     help_text = (
@@ -7816,32 +7911,33 @@ def get_webhook_info():
 
 @app.route('/webhook/' + TOKEN, methods=['POST'])
 def webhook():
-    """Handle incoming webhook updates"""
+    """Handle incoming webhook updates with better error handling"""
     try:
-        if request.headers.get('content-type') == 'application/json':
-            json_string = request.get_data().decode('utf-8')
-            logger.info(f"Received webhook update")
-            
-            update = telebot.types.Update.de_json(json_string)
-            logger.info(f"Processing update ID: {update.update_id}")
-            
-            # Log what type of update it is
-            if update.message:
-                logger.info(f"Message from user {update.message.from_user.id}: {update.message.text}")
-            elif update.callback_query:
-                logger.info(f"Callback from user {update.callback_query.from_user.id}: {update.callback_query.data}")
-            
-            # Process update - THIS IS THE KEY PART
-            try:
-                bot.process_new_updates([update])
-                logger.info(f"✓ Update {update.update_id} processed successfully")
-            except Exception as e:
-                logger.error(f"✗ Error processing update: {e}", exc_info=True)
-            
-            return '', 200
-        else:
+        if request.headers.get('content-type') != 'application/json':
             logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
             return '', 403
+        
+        json_string = request.get_data().decode('utf-8')
+        
+        if not json_string:
+            logger.warning("Empty webhook request")
+            return '', 400
+        
+        logger.debug(f"Received webhook update: {json_string[:100]}...")
+        
+        update = telebot.types.Update.de_json(json_string)
+        
+        # Log update info
+        if update.message:
+            logger.info(f"Message from {update.message.from_user.id}: {update.message.text}")
+        elif update.callback_query:
+            logger.info(f"Callback from {update.callback_query.from_user.id}: {update.callback_query.data}")
+        
+        # Process update
+        bot.process_new_updates([update])
+        
+        return '', 200
+        
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return '', 500
@@ -7912,7 +8008,7 @@ def verify_bot():
             'bot_id': me.id,
             'webhook_url': webhook_info.url,
             'webhook_set': bool(webhook_info.url),
-            'pending_updates': webhook_info.pending_update_count,  # ← Fixed: removed 's'
+            'pending_update_count': webhook_info.pending_update_count,
             'last_error': webhook_info.last_error_message or "None",
             'database': db_status,
             'handlers_registered': {
@@ -7999,70 +8095,79 @@ start_time = time.time()
 if __name__ == "__main__":
     try:
         logger.info("=== CRICKET BOT STARTING ===")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Telebot version: {telebot.__version__}")
         
         # Validate environment
+        logger.info("Validating environment...")
         validate_environment()
         
         # Initialize database
+        logger.info("Initializing database...")
         db_init()
         
-        # Create daily challenges
+        # Create scheduled tasks
+        logger.info("Setting up scheduled tasks...")
         create_daily_challenges()
         
-        # Schedule daily tasks
+        # Start scheduler in background
         def run_scheduled_tasks():
             schedule.every().day.at("00:00").do(create_daily_challenges)
+            schedule.every().day.at("12:00").do(create_scheduled_tournament)
             
             while True:
-                schedule.run_pending()
-                time.sleep(60)
+                try:
+                    schedule.run_pending()
+                    time.sleep(60)
+                except Exception as e:
+                    logger.error(f"Scheduler error: {e}")
         
-        # Start scheduler in background thread
         scheduler_thread = threading.Thread(target=run_scheduled_tasks, daemon=True)
         scheduler_thread.start()
-        logger.info("Scheduled tasks started")
+        logger.info("✓ Scheduled tasks started")
         
         if USE_WEBHOOK:
-            # Webhook mode
-            app = Flask(__name__)
-            
-            @app.route('/' + TOKEN, methods=['POST'])
-            def webhook():
-                json_string = request.get_data().decode('utf-8')
-                update = telebot.types.Update.de_json(json_string)
-                bot.process_new_updates([update])
-                return '', 200
-            
-            @app.route('/health', methods=['GET'])
-            def health():
-                return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
-            
-            @app.route('/')
-            def index():
-                return "Cricket Bot is running!"
+            logger.info("=== WEBHOOK MODE ===")
             
             # Set webhook
+            if setup_webhook():
+                logger.info("✓ Webhook configured successfully")
+                logger.info(f"Starting Flask on port {PORT}...")
+                
+                # Run Flask
+                app.run(
+                    host='0.0.0.0',
+                    port=PORT,
+                    debug=False,
+                    use_reloader=False  # Important for production
+                )
+            else:
+                logger.error("Webhook setup failed, falling back to polling")
+                USE_WEBHOOK = 0
+        
+        if not USE_WEBHOOK:
+            logger.info("=== POLLING MODE ===")
+            logger.info("Removing any existing webhook...")
             bot.remove_webhook()
             time.sleep(1)
-            webhook_url_full = f"{WEBHOOK_URL}/{TOKEN}"
-            bot.set_webhook(url=webhook_url_full)
-            logger.info(f"Webhook set to: {webhook_url_full}")
             
-            # Run Flask app
-            app.run(host='0.0.0.0', port=PORT, debug=False)
-        else:
-            # Polling mode
-            logger.info("Starting bot in polling mode...")
-            logger.info("Bot is ready to receive messages!")
-            bot.remove_webhook()
-            time.sleep(1)
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            logger.info("✓ Bot is ready to receive messages!")
+            logger.info("Press Ctrl+C to stop")
+            
+            bot.infinity_polling(
+                timeout=60,
+                long_polling_timeout=60,
+                skip_pending=True
+            )
             
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("\n=== Bot stopped by user ===")
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"=== FATAL ERROR ===", exc_info=True)
+        logger.error(f"Error: {e}")
         sys.exit(1)
+    finally:
+        logger.info("=== Cleanup complete ===")
 
 
 # === FINAL INITIALIZATION (MUST BE AT END) ===

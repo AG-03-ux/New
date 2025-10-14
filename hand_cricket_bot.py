@@ -6904,13 +6904,14 @@ def cmd_profile(message):
 @bot.message_handler(commands=['replay'])
 @rate_limit_check('command')
 def cmd_replay(message):
-    """Show last match replay/summary"""
+    """Show last match replay/summary with ball-by-ball"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
             
+            # Get last match
             cur.execute(f"""
                 SELECT * FROM match_history
                 WHERE user_id = {param_style}
@@ -6924,23 +6925,64 @@ def cmd_replay(message):
                 bot.reply_to(message, "No match history found!")
                 return
             
+            # Get ball-by-ball data if exists
+            cur.execute(f"""
+                SELECT * FROM match_replays
+                WHERE match_id = {param_style}
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (str(last_match['id']),))
+            
+            replay_data = cur.fetchone()
+            
             # Build replay display
             replay = (
                 f"{'🎬'*15}\n"
                 f"  MATCH REPLAY\n"
                 f"{'🎬'*15}\n\n"
-                f"Format: {last_match['match_format']}\n"
-                f"Date: {last_match['created_at'][:19]}\n\n"
+                f"📅 Date: {last_match['created_at'][:19]}\n"
+                f"📋 Format: <b>{last_match['match_format']}</b>\n\n"
+            )
+            
+            # Show ball-by-ball if available
+            if replay_data and replay_data.get('ball_by_ball'):
+                try:
+                    ball_by_ball = json.loads(replay_data['ball_by_ball'])
+                    
+                    replay += f"{'─'*40}\n"
+                    replay += "📊 BALL-BY-BALL BREAKDOWN\n"
+                    replay += f"{'─'*40}\n\n"
+                    
+                    for over_num, over_data in enumerate(ball_by_ball, 1):
+                        replay += f"<b>Over {over_num}:</b> "
+                        balls = over_data.get('balls', [])
+                        
+                        for ball in balls:
+                            if ball == 'W':
+                                replay += "W "
+                            elif ball == 0:
+                                replay += "• "
+                            else:
+                                replay += f"{ball} "
+                        
+                        replay += f"({over_data.get('runs', 0)} runs)\n"
+                    
+                    replay += "\n"
+                except:
+                    pass
+            
+            # Match summary
+            replay += (
                 f"{'─'*40}\n"
-                f"🏏 YOUR INNINGS\n"
+                f"🏏 <b>YOUR INNINGS</b>\n"
                 f"{'─'*40}\n"
-                f"Score: {last_match['player_score']}/{last_match['player_wickets']}\n"
+                f"Score: <b>{last_match['player_score']}/{last_match['player_wickets']}</b>\n"
                 f"Overs: {last_match['overs_played']:.1f}\n"
                 f"Strike Rate: {last_match['player_strike_rate']:.1f}\n\n"
                 f"{'─'*40}\n"
-                f"🤖 BOT INNINGS\n"
+                f"🤖 <b>BOT INNINGS</b>\n"
                 f"{'─'*40}\n"
-                f"Score: {last_match['bot_score']}/{last_match['bot_wickets']}\n\n"
+                f"Score: <b>{last_match['bot_score']}/{last_match['bot_wickets']}</b>\n\n"
                 f"{'═'*40}\n"
             )
             
@@ -6948,16 +6990,16 @@ def cmd_replay(message):
             margin = last_match['margin']
             
             if result == 'win':
-                replay += f"🏆 YOU WON by {margin}!\n"
+                replay += f"🏆 <b>YOU WON</b> by {margin}!\n"
             elif result == 'loss':
-                replay += f"💔 YOU LOST by {margin}\n"
+                replay += f"💔 <b>YOU LOST</b> by {margin}\n"
             else:
-                replay += f"🤝 MATCH TIED!\n"
+                replay += f"🤝 <b>MATCH TIED!</b>\n"
             
             replay += f"{'═'*40}\n"
-            replay += f"Duration: {last_match['match_duration_minutes']} minutes"
+            replay += f"⏱️ Duration: {last_match['match_duration_minutes']} minutes"
             
-            bot.send_message(message.chat.id, replay)
+            bot.send_message(message.chat.id, replay, parse_mode="HTML")
             
     except Exception as e:
         logger.error(f"Error in replay command: {e}")

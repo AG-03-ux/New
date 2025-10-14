@@ -9396,6 +9396,23 @@ import time
 start_time = time.time()
 
 
+@bot.message_handler(commands=['create_tables'])
+def cmd_create_tables(message):
+    """Force create missing tables - ADMIN ONLY"""
+    if message.from_user.id not in ADMIN_IDS:
+        bot.send_message(message.chat.id, "❌ Admin access required.")
+        return
+    
+    try:
+        create_additional_tables()
+        create_anticheat_tables()
+        bot.send_message(message.chat.id, "✅ Tables created successfully!")
+        logger.info("Tables created by admin command")
+    except Exception as e:
+        logger.error(f"Error creating tables: {e}")
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
+
+
 if __name__ == "__main__":
     try:
         logger.info("=== CRICKET BOT STARTING ===")

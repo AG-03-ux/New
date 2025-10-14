@@ -5207,131 +5207,197 @@ def check_powerplay_status(g: Dict[str, Any]) -> bool:
         return True
     return False
 
+# REPLACE your enhanced_process_ball_v2 function with this completely rewritten version
+
 def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
-    """Enhanced version with tournament and challenge integration - FIXED"""
+    """
+    Process a single ball delivery - COMPLETELY REWRITTEN FOR ROBUSTNESS
+    Handles all game logic including match end detection
+    """
+    
+    # STEP 1: Validate input
     if not (1 <= user_value <= 6):
-        return "Please send a number between 1 and 6"
+        return "❌ Please send a number between 1 and 6"
     
     try:
-        log_event(chat_id, "ball_input", f"user={user_value} from={user_id}")
-        
+        # STEP 2: Load game state
         game_state = GameState(chat_id)
-        logger.info(f"Game state loaded for chat {chat_id}: state={game_state.data.get('state', 'unknown')}")
         
-        if game_state.data['state'] != 'play':
-            logger.warning(f"Game state is '{game_state.data['state']}' instead of 'play' for chat {chat_id}")
-            return "No active match found. Use /play to start a new match."
+        if game_state.data.get('state') != 'play':
+            return "❌ No active match. Use /play to start a new match."
         
+        logger.info(f"Processing ball for chat {chat_id}: user={user_value}")
+        
+        # STEP 3: Calculate bot's move
         bot_value = calculate_bot_move(game_state.data, user_value)
-        logger.debug(f"User: {user_value}, Bot: {bot_value}")
-        
         is_wicket = (user_value == bot_value)
-        runs_scored = 0
+        
+        # STEP 4: Determine runs and update scores
         current_batting = game_state.data['batting']
+        runs_scored = 0
         
         if current_batting == "player":
-            game_state.update(player_balls_faced=game_state.data['player_balls_faced'] + 1)
+            # PLAYER IS BATTING
+            game_state.data['player_balls_faced'] += 1
             
             if is_wicket:
-                game_state.update(player_wkts=game_state.data['player_wkts'] + 1)
+                game_state.data['player_wkts'] += 1
+                logger.info(f"Player wicket! ({game_state.data['player_wkts']}/{game_state.data['wickets_limit']})")
             else:
                 runs_scored = user_value
-                new_score = game_state.data['player_score'] + runs_scored
-                updates = {'player_score': new_score}
+                game_state.data['player_score'] += runs_scored
                 
                 if runs_scored == 4:
-                    updates['player_fours'] = game_state.data['player_fours'] + 1
+                    game_state.data['player_fours'] += 1
                     AnimationManager.send_animation(chat_id, "four", "⚡ BOUNDARY!")
                 elif runs_scored == 6:
-                    updates['player_sixes'] = game_state.data['player_sixes'] + 1
+                    game_state.data['player_sixes'] += 1
                     AnimationManager.send_animation(chat_id, "six", "🚀 MAXIMUM!")
-                
-                game_state.update(**updates)
+        
         else:
-            game_state.update(bot_balls_faced=game_state.data['bot_balls_faced'] + 1)
+            # BOT IS BATTING
+            game_state.data['bot_balls_faced'] += 1
             
             if is_wicket:
-                game_state.update(bot_wkts=game_state.data['bot_wkts'] + 1)
+                game_state.data['bot_wkts'] += 1
+                logger.info(f"Bot wicket! ({game_state.data['bot_wkts']}/{game_state.data['wickets_limit']})")
                 AnimationManager.send_animation(chat_id, "wicket", "💥 WICKET!")
             else:
                 runs_scored = bot_value
-                new_score = game_state.data['bot_score'] + runs_scored
-                updates = {'bot_score': new_score}
+                game_state.data['bot_score'] += runs_scored
                 
                 if runs_scored == 4:
-                    updates['bot_fours'] = game_state.data['bot_fours'] + 1
+                    game_state.data['bot_fours'] += 1
                 elif runs_scored == 6:
-                    updates['bot_sixes'] = game_state.data['bot_sixes'] + 1
-                
-                game_state.update(**updates)
+                    game_state.data['bot_sixes'] += 1
         
+        # Generate commentary
         commentary = get_commentary(game_state.data, user_value, bot_value, runs_scored, is_wicket)
         
-        # Check for century milestone
-        if current_batting == "player" and game_state.data['player_score'] >= 100:
-            previous_score = game_state.data['player_score'] - runs_scored
-            if previous_score < 100:
-                AnimationManager.send_animation(chat_id, "century", "💯 CENTURY!")
-        
-        # CRITICAL FIX: Update balls_in_over AFTER processing the ball
+        # STEP 5: Update ball and over counts
         game_state.data['balls_in_over'] += 1
         
-        over_completed = False
-        powerplay_ended = False
-        
         # Check for over completion
+        over_completed = False
         if game_state.data['balls_in_over'] >= 6:
             game_state.data['balls_in_over'] = 0
             game_state.data['overs_bowled'] += 1
             over_completed = True
+            logger.info(f"Over {game_state.data['overs_bowled']} completed")
         
-        # Check powerplay status
-        if game_state.data.get('is_powerplay') and game_state.data['overs_bowled'] >= game_state.data.get('powerplay_overs', 0):
-            game_state.data['is_powerplay'] = False
-            powerplay_ended = True
+        # STEP 6: CHECK MATCH END CONDITIONS AFTER EACH BALL
+        match_ended = False
+        match_result = None
         
-        if not game_state.save():
-            logger.error("Failed to save game state")
-            return "Error saving game state. Please try again."
+        # CONDITION 1: Check if batting team got all-out
+        current_batting = game_state.data['batting']
+        if current_batting == "player" and game_state.data['player_wkts'] >= game_state.data['wickets_limit']:
+            logger.info("MATCH END: Player all out")
+            match_ended = True
+        elif current_batting == "bot" and game_state.data['bot_wkts'] >= game_state.data['wickets_limit']:
+            logger.info("MATCH END: Bot all out")
+            match_ended = True
         
-        # Update challenges after each ball
-        tracker = ChallengeTracker(user_id)
+        # CONDITION 2: Check if batting team completed all overs
+        if game_state.data['overs_bowled'] >= game_state.data['overs_limit'] and game_state.data['balls_in_over'] == 0:
+            logger.info("MATCH END: All overs completed")
+            match_ended = True
         
-        if current_batting == "player":
-            tracker.update_progress(ChallengeType.SCORE, game_state.data['player_score'], game_state.data)
-            tracker.update_progress(ChallengeType.SIXES, game_state.data['player_sixes'])
-            tracker.update_progress(ChallengeType.BOUNDARIES, 
-                                  game_state.data['player_fours'] + game_state.data['player_sixes'])
+        # CONDITION 3: Check if second innings target was exceeded (CRITICAL!)
+        if game_state.data['innings'] == 2 and game_state.data.get('target'):
+            target = game_state.data['target']
+            
+            if current_batting == "player":
+                current_score = game_state.data['player_score']
+            else:
+                current_score = game_state.data['bot_score']
+            
+            # IMPORTANT: End match immediately when target is EXCEEDED
+            if current_score > target:
+                logger.info(f"MATCH END: Target exceeded! Score {current_score} > Target {target}")
+                match_ended = True
         
-        # CRITICAL FIX: Check innings end PROPERLY
-        innings_check = check_innings_end(game_state.data)
+        # STEP 7: Handle match end or continue game
+        if match_ended:
+            # Determine winner before saving
+            if game_state.data['innings'] == 1:
+                # First innings ended - transition to second innings
+                game_state.data['target'] = game_state.data['player_score'] if current_batting == 'player' else game_state.data['bot_score']
+                game_state.data['innings'] = 2
+                game_state.data['overs_bowled'] = 0
+                game_state.data['balls_in_over'] = 0
+                game_state.data['batting'] = 'bot' if current_batting == 'player' else 'player'
+                
+                game_state.save()
+                
+                # Announce first innings end
+                first_innings_score = game_state.data['target']
+                bot.send_message(
+                    chat_id,
+                    f"🏁 <b>First Innings Complete!</b>\n\n"
+                    f"Score: {first_innings_score} runs\n\n"
+                    f"🎯 <b>Second Innings Starting...</b>\n"
+                    f"Target: {first_innings_score + 1}\n\n"
+                    f"{'🏏 Your turn to bat!' if game_state.data['batting'] == 'player' else '🎳 Your turn to bowl!'}"
+                )
+                
+                return {
+                    'commentary': commentary,
+                    'is_wicket': is_wicket,
+                    'runs_scored': runs_scored,
+                    'over_completed': over_completed,
+                    'game_state': game_state.data,
+                    'match_ended': False,
+                    'innings_changed': True
+                }
+            
+            else:
+                # SECOND INNINGS ENDED - MATCH OVER
+                match_result = determine_match_result(game_state.data)
+                
+                # Save to history
+                save_match_to_history(
+                    chat_id,
+                    user_id,
+                    game_state,
+                    match_result['result_type'],
+                    f"{match_result['margin']} {match_result['margin_type']}"
+                )
+                
+                # Update user stats
+                update_user_stats_after_match(user_id, game_state, match_result['result_type'])
+                
+                # Complete the match (show summary, delete game)
+                complete_match_enhanced(chat_id, game_state.data, user_id)
+                
+                # Clean up
+                game_state.delete()
+                
+                return {
+                    'commentary': commentary,
+                    'is_wicket': is_wicket,
+                    'runs_scored': runs_scored,
+                    'over_completed': over_completed,
+                    'game_state': game_state.data,
+                    'match_ended': True,
+                    'result': match_result
+                }
         
-        if innings_check['innings_end']:
-            result = end_innings_or_match_v2(game_state, user_id)
-            return {
-                'commentary': commentary,
-                'is_wicket': is_wicket,
-                'runs_scored': runs_scored,
-                'over_completed': over_completed,
-                'powerplay_ended': powerplay_ended,
-                'game_state': game_state.data,
-                'match_ended': True,
-                'result': result
-            }
+        # STEP 8: Save game and continue
+        game_state.save()
         
         return {
             'commentary': commentary,
             'is_wicket': is_wicket,
             'runs_scored': runs_scored,
             'over_completed': over_completed,
-            'powerplay_ended': powerplay_ended,
             'game_state': game_state.data,
             'match_ended': False
         }
-        
+    
     except Exception as e:
-        logger.error(f"Error processing ball for chat {chat_id}, user {user_id}: {e}", exc_info=True)
-        return "An error occurred while processing your move. Please try again."
+        logger.error(f"Error processing ball: {e}", exc_info=True)
+        return f"❌ Error processing move: {str(e)}"
         
 def check_innings_end(g: Dict[str, Any]) -> dict:
     """Check if innings should end - FINAL FIX"""
@@ -6606,49 +6672,54 @@ def cmd_score(message: types.Message):
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit() and 1 <= int(message.text) <= 6)
 def handle_game_input(message):
+    """Handle game input (1-6) - UPDATED FOR NEW BALL PROCESSING"""
     try:
         ensure_user(message)
         number = int(message.text)
         chat_id = message.chat.id
         user_id = message.from_user.id
         
-        logger.info(f"Game input {number} from user {user_id}")
+        logger.info(f"Game input {number} from user {user_id} in chat {chat_id}")
         
-        # Check if there's an active game
-        g = safe_load_game(chat_id)
-        if not g or g.get("state") != "play":
-            bot.reply_to(message, "No active match found. Use /play to start a new match.")
-            return
-            
         # Process the ball
         result = enhanced_process_ball_v2(chat_id, number, user_id)
         
-        if isinstance(result, dict):
-            # Handle the result properly
-            commentary_msg = result['commentary']
-            
-            if result.get('match_ended'):
-                bot.send_message(chat_id, commentary_msg)
-                # Match end logic handled in enhanced_process_ball_v2
-            else:
-                # Show ball result and current score
-                bot.send_message(chat_id, commentary_msg)
-                
-                if result.get('over_completed'):
-                    bot.send_message(chat_id, "🎯 Over completed!")
-                    
-                if result.get('powerplay_ended'):
-                    bot.send_message(chat_id, "⚡ Powerplay ended!")
-                    
-                # Show updated score
-                show_live_score(chat_id, result['game_state'], detailed=False)
-        else:
-            # Handle string responses (errors)
-            bot.reply_to(message, str(result))
-            
+        if isinstance(result, str):
+            # Error message
+            bot.reply_to(message, result)
+            return
+        
+        if not isinstance(result, dict):
+            bot.reply_to(message, "Unexpected error")
+            return
+        
+        # Send commentary
+        commentary = result.get('commentary', '')
+        if commentary:
+            bot.send_message(chat_id, commentary)
+        
+        # Check if innings changed (first innings ended)
+        if result.get('innings_changed'):
+            # Message already sent in enhanced_process_ball_v2
+            return
+        
+        # Check if match ended
+        if result.get('match_ended'):
+            # Match summary already sent in enhanced_process_ball_v2
+            return
+        
+        # Over completed - notify
+        if result.get('over_completed'):
+            bot.send_message(chat_id, "⚪ <b>Over Complete!</b>", parse_mode="HTML")
+        
+        # Show updated live score
+        game_state = result.get('game_state', {})
+        if game_state:
+            show_live_score(chat_id, game_state, detailed=False)
+    
     except Exception as e:
         logger.error(f"Error in game input handler: {e}", exc_info=True)
-        bot.reply_to(message, "Error processing your move. Please try again.")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 @bot.message_handler(func=lambda message: message.text and "📊" in message.text)
 def handle_score_request(message: types.Message):

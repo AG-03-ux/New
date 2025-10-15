@@ -21,19 +21,30 @@ from collections import defaultdict, deque
 from functools import wraps
 import schedule
 from collections import deque
-import json
-import uuid
-from enum import Enum
-import os
-from pathlib import Path
-import time
-import schedule
-from collections import deque
 import uuid
 from pathlib import Path
 
 
+def get_param_style():
+    """Get correct parameter placeholder for current database"""
+    return "%s" if bool(os.getenv("DATABASE_URL")) else "?"
 
+def execute_safe_query(cursor, query_template, params, is_insert=False):
+    """Execute query with proper parameter style and return result"""
+    is_postgres = bool(os.getenv("DATABASE_URL"))
+    param_style = "%s" if is_postgres else "?"
+    
+    # Replace all ? with %s for postgres or vice versa
+    if is_postgres:
+        query = query_template.replace("?", "%s")
+    else:
+        query = query_template
+    
+    cursor.execute(query, params)
+    
+    if not is_insert:
+        return cursor.fetchone()
+    return True
 # Load environment variables first
 load_dotenv()
 
@@ -102,19 +113,40 @@ try:
 except (ValueError, AttributeError):
     ADMIN_IDS = []
 
-# Logging setup
-import logging.config
+# Logging setup - SINGLE CONFIGURATION
+import logging.handlers
 
 logger = logging.getLogger('cricket-bot')
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(levelname)s] %(asctime)s - %(name)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('cricket_bot.log')
-    ]
-)
-logger = logging.getLogger("cricket-bot")
+
+# Only configure if not already configured
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    
+    # File handler
+    file_handler = logging.handlers.RotatingFileHandler(
+        'cricket_bot.log',
+        maxBytes=10485760,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    
+    # Formatter
+    formatter = logging.Formatter(
+        '[%(levelname)s] %(asctime)s - %(name)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+    
+    # Add handlers
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+
+logger.info("=== MODULE LOADING STARTED ===")
 
 logger.info("=== MODULE LOADING STARTED ===")
 logger.info(f"TOKEN present: {bool(TOKEN)}")
@@ -170,10 +202,7 @@ def get_user_session_data(user_id: int, key: str = None, default=None):
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            is_postgres = bool(os.getenv("DATABASE_URL"))
-            param_style = "%s" if is_postgres else "?"
-            
-            cur.execute(f"SELECT session_data FROM user_sessions WHERE user_id = {param_style}", (user_id,))
+            execute_query(cur, "SELECT * FROM users WHERE user_id = ?", (user_id,))
             
             row = cur.fetchone()
             if row and row['session_data']:
@@ -268,11 +297,28 @@ class RateLimiter:
     def __init__(self):
         self.user_actions = defaultdict(lambda: deque())
         self.limits = {
-            'ball_input': (10, 10),  # 10 actions per 10 seconds (more lenient)
-            'command': (5, 60),      
-            'callback': (10, 60),    
+            'ball_input': (10, 10),
+            'command': (5, 60),
+            'callback': (10, 60),
         }
+        self.cleanup_time = time.time()
     
+    def _cleanup(self):
+        """Remove old entries to prevent memory leak"""
+        current_time = time.time()
+        
+        # Only cleanup every 300 seconds (5 minutes)
+        if current_time - self.cleanup_time < 300:
+            return
+        
+        self.cleanup_time = current_time
+        
+        # Remove entries for users not seen in 24 hours
+        expired_users = []
+        
+        for key in list(self.user_actions.keys()):
+            queue = self.user_actions[key]
+
     def is_allowed(self, user_id: int, action_type: str = 'default') -> bool:
         if action_type not in self.limits:
             action_type = 'default'
@@ -704,6 +750,8 @@ def db_init():
         create_additional_tables()
         create_anticheat_tables()
         migrate_database()
+        create_tournament_context_table()
+
         
         logger.info("=== MIGRATIONS COMPLETED ===")
         logger.info("Database initialization completed successfully")
@@ -714,7 +762,6 @@ def db_init():
 
 
 import hashlib
-from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple
 
 class AntiCheatSystem:
@@ -1176,72 +1223,132 @@ def anticheat_middleware(func):
     """Decorator to track user actions and detect cheating"""
     @wraps(func)
     def wrapper(message, *args, **kwargs):
-        user_id = message.from_user.id
-        action_start = time.time()
-        
-        # Record device fingerprint
-        fingerprint = AntiCheatSystem.create_device_fingerprint(message)
-        AntiCheatSystem.record_device_fingerprint(user_id, fingerprint)
-        
-        # Execute the function
-        result = func(message, *args, **kwargs)
-        
-        # Calculate reaction time
-        reaction_time = time.time() - action_start
-        AntiCheatSystem.log_user_action(user_id, func.__name__, reaction_time)
-        
-        # Periodic behavior check (every 10th action)
-        if random.random() < 0.1:  # 10% chance
-            behavior = AntiCheatSystem.check_user_behavior(user_id)
+        try:
+            user_id = message.from_user.id
+            action_start = time.time()
             
-            if behavior['suspicious']:
-                # Log the suspicious activity
-                try:
-                    with get_db_connection() as conn:
-                        cur = conn.cursor()
-                        is_postgres = bool(os.getenv("DATABASE_URL"))
-                        now = datetime.now(timezone.utc).isoformat()
-                        
-                        for violation in behavior['violations']:
-                            if is_postgres:
-                                cur.execute("""
-                                    INSERT INTO anticheat_reports 
-                                    (user_id, violation_type, severity, details, risk_score, created_at)
-                                    VALUES (%s, %s, %s, %s, %s, %s)
-                                """, (user_id, violation['type'], violation['severity'], 
-                                      violation['details'], behavior['risk_score'], now))
-                            else:
-                                cur.execute("""
-                                    INSERT INTO anticheat_reports 
-                                    (user_id, violation_type, severity, details, risk_score, created_at)
-                                    VALUES (?, ?, ?, ?, ?, ?)
-                                """, (user_id, violation['type'], violation['severity'], 
-                                      violation['details'], behavior['risk_score'], now))
-                except Exception as e:
-                    logger.error(f"Error logging anticheat report: {e}")
+            # Record device fingerprint
+            fingerprint = AntiCheatSystem.create_device_fingerprint(message)
+            AntiCheatSystem.record_device_fingerprint(user_id, fingerprint)
+            
+            # Execute the function
+            result = func(message, *args, **kwargs)
+            
+            # Calculate reaction time
+            reaction_time = time.time() - action_start
+            AntiCheatSystem.log_user_action(user_id, func.__name__, reaction_time)
+            
+            # Periodic behavior check (every 5th action instead of 10th)
+            if random.random() < 0.2:  # 20% chance
+                behavior = AntiCheatSystem.check_user_behavior(user_id)
                 
-                # Auto-ban for critical violations
-                if behavior['risk_score'] >= 80:
-                    AntiCheatSystem.ban_user(
-                        user_id, 
-                        f"Automated ban - Risk score: {behavior['risk_score']}", 
-                        'extended'
-                    )
-                    bot.send_message(
-                        message.chat.id,
-                        "🚫 Your account has been suspended due to suspicious activity. "
-                        "Contact support if you believe this is an error."
-                    )
-                elif behavior['risk_score'] >= 60:
-                    # Warning
-                    bot.send_message(
-                        message.chat.id,
-                        "⚠️ Warning: Suspicious activity detected on your account. "
-                        "Continuing may result in a ban."
-                    )
-        
-        return result
+                if behavior['suspicious']:
+                    check_and_warn_cheating(user_id, message.chat.id, behavior)
+                    
+                    # Log report
+                    try:
+                        with get_db_connection() as conn:
+                            cur = conn.cursor()
+                            is_postgres = bool(os.getenv("DATABASE_URL"))
+                            now = datetime.now(timezone.utc).isoformat()
+                            
+                            for violation in behavior['violations']:
+                                if is_postgres:
+                                    cur.execute("""
+                                        INSERT INTO anticheat_reports 
+                                        (user_id, violation_type, severity, details, risk_score, created_at)
+                                        VALUES (%s, %s, %s, %s, %s, %s)
+                                    """, (user_id, violation['type'], violation['severity'],
+                                          violation['details'], behavior['risk_score'], now))
+                                else:
+                                    cur.execute("""
+                                        INSERT INTO anticheat_reports 
+                                        (user_id, violation_type, severity, details, risk_score, created_at)
+                                        VALUES (?, ?, ?, ?, ?, ?)
+                                    """, (user_id, violation['type'], violation['severity'],
+                                          violation['details'], behavior['risk_score'], now))
+                    except Exception as e:
+                        logger.error(f"Error logging anticheat report: {e}")
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error in anticheat middleware: {e}")
+            return None
+    
     return wrapper
+
+
+def check_and_warn_cheating(user_id: int, chat_id: int, behavior: dict):
+    """Progressive cheat detection with warnings"""
+    try:
+        risk_score = behavior['risk_score']
+        violations = behavior['violations']
+        
+        if risk_score < 30:
+            # No action needed
+            return
+        
+        elif risk_score < 50:
+            # First warning
+            warning_msg = (
+                "⚠️ <b>Activity Warning</b>\n\n"
+                "We've detected unusual activity on your account.\n"
+                "Continue playing normally to clear this warning.\n\n"
+                "Risk Score: " + str(risk_score) + "/100"
+            )
+            bot.send_message(chat_id, warning_msg)
+            
+        elif risk_score < 70:
+            # Second warning - more serious
+            warning_msg = (
+                "⚠️⚠️ <b>SERIOUS WARNING</b>\n\n"
+                "Multiple suspicious patterns detected.\n"
+                "Further violations may result in account suspension.\n\n"
+                "Issues detected:\n"
+            )
+            for violation in violations[:3]:
+                warning_msg += f"• {violation['type']}: {violation['details']}\n"
+            
+            warning_msg += f"\nRisk Score: {risk_score}/100"
+            
+            bot.send_message(chat_id, warning_msg)
+            
+        elif risk_score < 85:
+            # Final warning - last chance
+            final_warning = (
+                "🚫 <b>FINAL WARNING - ACCOUNT AT RISK</b>\n\n"
+                "Your account shows critical signs of rule violations.\n"
+                "Next violation will result in permanent suspension.\n\n"
+                "Violations:\n"
+            )
+            for violation in violations:
+                final_warning += f"• {violation['type']} ({violation['severity']}): {violation['details']}\n"
+            
+            final_warning += f"\nRisk Score: {risk_score}/100\n\n"
+            final_warning += "Contact support if you believe this is an error."
+            
+            bot.send_message(chat_id, final_warning)
+            
+        else:
+            # Auto-ban
+            AntiCheatSystem.ban_user(
+                user_id,
+                f"Automated ban - Risk score: {risk_score} - Violations: {len(violations)}",
+                'permanent'
+            )
+            
+            ban_msg = (
+                "🚫 <b>ACCOUNT SUSPENDED</b>\n\n"
+                "Your account has been suspended due to repeated rule violations.\n\n"
+                "Reason: Suspicious activity detected\n"
+                "Type: Permanent Ban\n\n"
+                "Appeal: Contact support with evidence of fair play."
+            )
+            
+            bot.send_message(chat_id, ban_msg)
+            
+    except Exception as e:
+        logger.error(f"Error in cheat warning system: {e}")
 
 
 class CricketShopItem:
@@ -1508,20 +1615,30 @@ class PowerUp:
     
     @staticmethod
     def update_powerup_durations(game: 'GameState'):
-        """Decrease power-up durations after each over"""
-        active_powerups = game.data.get('active_powerups', {})
-        expired = []
-        
-        for powerup_id, powerup_data in active_powerups.items():
-            powerup_data['duration_remaining'] -= 1
-            if powerup_data['duration_remaining'] <= 0:
-                expired.append(powerup_id)
-        
-        for powerup_id in expired:
-            del active_powerups[powerup_id]
-        
-        game.data['active_powerups'] = active_powerups
-        game.save()
+        """Decrease power-up durations after each over - FIXED"""
+        try:
+            active_powerups = game.data.get('active_powerups', {})
+            expired = []
+            
+            for powerup_id, powerup_data in list(active_powerups.items()):
+                # Decrease remaining duration
+                powerup_data['duration_remaining'] -= 1
+                
+                # Check if expired
+                if powerup_data['duration_remaining'] <= 0:
+                    expired.append(powerup_id)
+                    # Optional: notify player
+                    logger.info(f"PowerUp {powerup_id} expired for chat {game.chat_id}")
+            
+            # Remove expired
+            for powerup_id in expired:
+                del active_powerups[powerup_id]
+            
+            game.data['active_powerups'] = active_powerups
+            game.save()
+            
+        except Exception as e:
+            logger.error(f"Error updating powerup durations: {e}")
 
 
 def kb_powerups_shop() -> types.InlineKeyboardMarkup:
@@ -1794,11 +1911,24 @@ def default_game(chat_id: int, overs: int = DEFAULT_OVERS, wickets: int = DEFAUL
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+from threading import Lock
+
+# Add this after imports
+game_locks = {}
+
+def get_game_lock(chat_id):
+    """Get or create a lock for this chat"""
+    if chat_id not in game_locks:
+        game_locks[chat_id] = Lock()
+    return game_locks[chat_id]
+
+
 
 # Game State Management
 class GameState:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
+        self.lock = get_game_lock(chat_id)
         self.data = self._load_or_create()
         self.data['chat_id'] = chat_id
     
@@ -1828,137 +1958,57 @@ class GameState:
         return game_data
         
     def save(self) -> bool:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                self.data['updated_at'] = datetime.now(timezone.utc).isoformat()
-                self.data['chat_id'] = self.chat_id  # Ensure chat_id is always set
-                
-                is_postgres = bool(os.getenv("DATABASE_URL"))
-                
-                # Ensure all required fields have default values
-                default_values = {
-                    'state': 'toss',
-                    'innings': 1,
-                    'batting': None,
-                    'player_score': 0,
-                    'bot_score': 0,
-                    'player_wkts': 0,
-                    'bot_wkts': 0,
-                    'balls_in_over': 0,
-                    'overs_bowled': 0,
-                    'target': None,
-                    'overs_limit': DEFAULT_OVERS,
-                    'wickets_limit': DEFAULT_WICKETS,
-                    'match_format': 'T2',
-                    'difficulty_level': 'medium',
-                    'player_balls_faced': 0,
-                    'bot_balls_faced': 0,
-                    'player_fours': 0,
-                    'player_sixes': 0,
-                    'bot_fours': 0,
-                    'bot_sixes': 0,
-                    'extras': 0,
-                    'powerplay_overs': 0,
-                    'is_powerplay': False,
-                    'weather_condition': 'clear',
-                    'pitch_condition': 'normal',
-                    'tournament_id': None,
-                    'tournament_round': None,
-                    'opponent_id': None,
-                    'is_tournament_match': False,
-                    'created_at': datetime.now(timezone.utc).isoformat(),
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                }
-                
-                # Apply defaults for missing values
-                for key, default_val in default_values.items():
-                    if key not in self.data or self.data[key] is None:
-                        self.data[key] = default_val
-                
-                if is_postgres:
-                    # PostgreSQL upsert
-                    cur.execute("""
-                        INSERT INTO games (
-                            chat_id, state, innings, batting, player_score, bot_score,
-                            player_wkts, bot_wkts, balls_in_over, overs_bowled, target,
-                            overs_limit, wickets_limit, match_format, difficulty_level,
-                            player_balls_faced, bot_balls_faced, player_fours, player_sixes,
-                            bot_fours, bot_sixes, extras, powerplay_overs, is_powerplay,
-                            weather_condition, pitch_condition, tournament_id, tournament_round,
-                            opponent_id, is_tournament_match, created_at, updated_at
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-                            %s, %s
-                        )
-                        ON CONFLICT (chat_id) DO UPDATE SET
-                            state = EXCLUDED.state,
-                            innings = EXCLUDED.innings,
-                            batting = EXCLUDED.batting,
-                            player_score = EXCLUDED.player_score,
-                            bot_score = EXCLUDED.bot_score,
-                            player_wkts = EXCLUDED.player_wkts,
-                            bot_wkts = EXCLUDED.bot_wkts,
-                            balls_in_over = EXCLUDED.balls_in_over,
-                            overs_bowled = EXCLUDED.overs_bowled,
-                            target = EXCLUDED.target,
-                            overs_limit = EXCLUDED.overs_limit,
-                            wickets_limit = EXCLUDED.wickets_limit,
-                            match_format = EXCLUDED.match_format,
-                            difficulty_level = EXCLUDED.difficulty_level,
-                            player_balls_faced = EXCLUDED.player_balls_faced,
-                            bot_balls_faced = EXCLUDED.bot_balls_faced,
-                            player_fours = EXCLUDED.player_fours,
-                            player_sixes = EXCLUDED.player_sixes,
-                            bot_fours = EXCLUDED.bot_fours,
-                            bot_sixes = EXCLUDED.bot_sixes,
-                            extras = EXCLUDED.extras,
-                            powerplay_overs = EXCLUDED.powerplay_overs,
-                            is_powerplay = EXCLUDED.is_powerplay,
-                            weather_condition = EXCLUDED.weather_condition,
-                            pitch_condition = EXCLUDED.pitch_condition,
-                            tournament_id = EXCLUDED.tournament_id,
-                            tournament_round = EXCLUDED.tournament_round,
-                            opponent_id = EXCLUDED.opponent_id,
-                            is_tournament_match = EXCLUDED.is_tournament_match,
-                            updated_at = EXCLUDED.updated_at
-                    """, tuple(self.data.get(k) for k in [
-                        'chat_id', 'state', 'innings', 'batting', 'player_score', 'bot_score',
-                        'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
-                        'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
-                        'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
-                        'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
-                        'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
-                        'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
-                    ]))
-                else:
-                    # SQLite upsert - Check if record exists first
-                    cur.execute("SELECT chat_id FROM games WHERE chat_id = ?", (self.chat_id,))
-                    if cur.fetchone():
-                        # Update existing record
-                        cur.execute("""
-                            UPDATE games SET 
-                                state=?, innings=?, batting=?, player_score=?, bot_score=?,
-                                player_wkts=?, bot_wkts=?, balls_in_over=?, overs_bowled=?, 
-                                target=?, overs_limit=?, wickets_limit=?, match_format=?, 
-                                difficulty_level=?, player_balls_faced=?, bot_balls_faced=?,
-                                player_fours=?, player_sixes=?, bot_fours=?, bot_sixes=?,
-                                extras=?, powerplay_overs=?, is_powerplay=?, weather_condition=?,
-                                pitch_condition=?, tournament_id=?, tournament_round=?, 
-                                opponent_id=?, is_tournament_match=?, updated_at=?
-                            WHERE chat_id=?
-                        """, tuple(self.data.get(k) for k in [
-                            'state', 'innings', 'batting', 'player_score', 'bot_score',
-                            'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
-                            'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
-                            'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
-                            'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
-                            'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
-                            'opponent_id', 'is_tournament_match', 'updated_at'
-                        ]) + (self.chat_id,))
-                    else:
-                        # Insert new record
+        with self.lock:
+            try:
+                with get_db_connection() as conn:
+                    cur = conn.cursor()
+                    self.data['updated_at'] = datetime.now(timezone.utc).isoformat()
+                    self.data['chat_id'] = self.chat_id  # Ensure chat_id is always set
+                    
+                    is_postgres = bool(os.getenv("DATABASE_URL"))
+                    
+                    # Ensure all required fields have default values
+                    default_values = {
+                        'state': 'toss',
+                        'innings': 1,
+                        'batting': None,
+                        'player_score': 0,
+                        'bot_score': 0,
+                        'player_wkts': 0,
+                        'bot_wkts': 0,
+                        'balls_in_over': 0,
+                        'overs_bowled': 0,
+                        'target': None,
+                        'overs_limit': DEFAULT_OVERS,
+                        'wickets_limit': DEFAULT_WICKETS,
+                        'match_format': 'T2',
+                        'difficulty_level': 'medium',
+                        'player_balls_faced': 0,
+                        'bot_balls_faced': 0,
+                        'player_fours': 0,
+                        'player_sixes': 0,
+                        'bot_fours': 0,
+                        'bot_sixes': 0,
+                        'extras': 0,
+                        'powerplay_overs': 0,
+                        'is_powerplay': False,
+                        'weather_condition': 'clear',
+                        'pitch_condition': 'normal',
+                        'tournament_id': None,
+                        'tournament_round': None,
+                        'opponent_id': None,
+                        'is_tournament_match': False,
+                        'created_at': datetime.now(timezone.utc).isoformat(),
+                        'updated_at': datetime.now(timezone.utc).isoformat()
+                    }
+                    
+                    # Apply defaults for missing values
+                    for key, default_val in default_values.items():
+                        if key not in self.data or self.data[key] is None:
+                            self.data[key] = default_val
+                    
+                    if is_postgres:
+                        # PostgreSQL upsert
                         cur.execute("""
                             INSERT INTO games (
                                 chat_id, state, innings, batting, player_score, bot_score,
@@ -1968,24 +2018,105 @@ class GameState:
                                 bot_fours, bot_sixes, extras, powerplay_overs, is_powerplay,
                                 weather_condition, pitch_condition, tournament_id, tournament_round,
                                 opponent_id, is_tournament_match, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            self.chat_id,
-                            *tuple(self.data.get(k) for k in [
+                            ) VALUES (
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+                                %s, %s
+                            )
+                            ON CONFLICT (chat_id) DO UPDATE SET
+                                state = EXCLUDED.state,
+                                innings = EXCLUDED.innings,
+                                batting = EXCLUDED.batting,
+                                player_score = EXCLUDED.player_score,
+                                bot_score = EXCLUDED.bot_score,
+                                player_wkts = EXCLUDED.player_wkts,
+                                bot_wkts = EXCLUDED.bot_wkts,
+                                balls_in_over = EXCLUDED.balls_in_over,
+                                overs_bowled = EXCLUDED.overs_bowled,
+                                target = EXCLUDED.target,
+                                overs_limit = EXCLUDED.overs_limit,
+                                wickets_limit = EXCLUDED.wickets_limit,
+                                match_format = EXCLUDED.match_format,
+                                difficulty_level = EXCLUDED.difficulty_level,
+                                player_balls_faced = EXCLUDED.player_balls_faced,
+                                bot_balls_faced = EXCLUDED.bot_balls_faced,
+                                player_fours = EXCLUDED.player_fours,
+                                player_sixes = EXCLUDED.player_sixes,
+                                bot_fours = EXCLUDED.bot_fours,
+                                bot_sixes = EXCLUDED.bot_sixes,
+                                extras = EXCLUDED.extras,
+                                powerplay_overs = EXCLUDED.powerplay_overs,
+                                is_powerplay = EXCLUDED.is_powerplay,
+                                weather_condition = EXCLUDED.weather_condition,
+                                pitch_condition = EXCLUDED.pitch_condition,
+                                tournament_id = EXCLUDED.tournament_id,
+                                tournament_round = EXCLUDED.tournament_round,
+                                opponent_id = EXCLUDED.opponent_id,
+                                is_tournament_match = EXCLUDED.is_tournament_match,
+                                updated_at = EXCLUDED.updated_at
+                        """, tuple(self.data.get(k) for k in [
+                            'chat_id', 'state', 'innings', 'batting', 'player_score', 'bot_score',
+                            'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
+                            'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
+                            'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
+                            'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
+                            'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
+                            'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
+                        ]))
+                    else:
+                        # SQLite upsert - Check if record exists first
+                        cur.execute("SELECT chat_id FROM games WHERE chat_id = ?", (self.chat_id,))
+                        if cur.fetchone():
+                            # Update existing record
+                            cur.execute("""
+                                UPDATE games SET 
+                                    state=?, innings=?, batting=?, player_score=?, bot_score=?,
+                                    player_wkts=?, bot_wkts=?, balls_in_over=?, overs_bowled=?, 
+                                    target=?, overs_limit=?, wickets_limit=?, match_format=?, 
+                                    difficulty_level=?, player_balls_faced=?, bot_balls_faced=?,
+                                    player_fours=?, player_sixes=?, bot_fours=?, bot_sixes=?,
+                                    extras=?, powerplay_overs=?, is_powerplay=?, weather_condition=?,
+                                    pitch_condition=?, tournament_id=?, tournament_round=?, 
+                                    opponent_id=?, is_tournament_match=?, updated_at=?
+                                WHERE chat_id=?
+                            """, tuple(self.data.get(k) for k in [
                                 'state', 'innings', 'batting', 'player_score', 'bot_score',
                                 'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
                                 'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
                                 'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
                                 'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
                                 'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
-                                'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
-                            ])
-                        ))
-                return True
-        except Exception as e:
-            logger.error(f"Failed to save game state: {e}")
-            return False
+                                'opponent_id', 'is_tournament_match', 'updated_at'
+                            ]) + (self.chat_id,))
+                        else:
+                            # Insert new record
+                            cur.execute("""
+                                INSERT INTO games (
+                                    chat_id, state, innings, batting, player_score, bot_score,
+                                    player_wkts, bot_wkts, balls_in_over, overs_bowled, target,
+                                    overs_limit, wickets_limit, match_format, difficulty_level,
+                                    player_balls_faced, bot_balls_faced, player_fours, player_sixes,
+                                    bot_fours, bot_sixes, extras, powerplay_overs, is_powerplay,
+                                    weather_condition, pitch_condition, tournament_id, tournament_round,
+                                    opponent_id, is_tournament_match, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                self.chat_id,
+                                *tuple(self.data.get(k) for k in [
+                                    'state', 'innings', 'batting', 'player_score', 'bot_score',
+                                    'player_wkts', 'bot_wkts', 'balls_in_over', 'overs_bowled', 'target',
+                                    'overs_limit', 'wickets_limit', 'match_format', 'difficulty_level',
+                                    'player_balls_faced', 'bot_balls_faced', 'player_fours', 'player_sixes',
+                                    'bot_fours', 'bot_sixes', 'extras', 'powerplay_overs', 'is_powerplay',
+                                    'weather_condition', 'pitch_condition', 'tournament_id', 'tournament_round',
+                                    'opponent_id', 'is_tournament_match', 'created_at', 'updated_at'
+                                ])
+                            ))
+                        return True
+            except Exception as e:
+                logger.error(f"Failed to save game state: {e}")
+                return False
         
     def delete(self) -> bool:
         try:
@@ -3461,38 +3592,84 @@ def create_additional_tables():
 
 
 def save_tournament_to_db(tournament: EliteTournament, chat_id: int = None):
-    """Save tournament state to database"""
+    """Save tournament state to database - FIXED with participants"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
-            
-            tournament_json = json.dumps(tournament.to_dict())
             now = datetime.now(timezone.utc).isoformat()
             
+            tournament_json = json.dumps(tournament.to_dict())
+            
+            # First, delete old participants for this tournament
+            if is_postgres:
+                cur.execute("DELETE FROM tournament_participants WHERE tournament_id = %s", 
+                           (tournament.tournament_id,))
+            else:
+                cur.execute("DELETE FROM tournament_participants WHERE tournament_id = ?", 
+                           (tournament.tournament_id,))
+            
+            # Save tournament data
             if is_postgres:
                 cur.execute("""
-                    INSERT INTO tournaments (name, type, theme, status, format, entry_fee, prize_pool,
-                                           max_players, created_by, created_at, brackets, metadata)
-                    VALUES (%s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s, %s)
+                    INSERT INTO tournaments 
+                    (id, name, type, theme, status, format, entry_fee, prize_pool,
+                     max_players, created_by, created_at, brackets, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
-                    brackets = EXCLUDED.brackets, metadata = EXCLUDED.metadata
-                """, (tournament.tournament_id, tournament.name, tournament.type, tournament.theme, 
-                      tournament.tournament_state, f"T{tournament.format_overs}",
-                      len(tournament.participants), tournament.created_by, now,
+                        status = EXCLUDED.status,
+                        brackets = EXCLUDED.brackets,
+                        metadata = EXCLUDED.metadata
+                """, (tournament.tournament_id, tournament.name, tournament.type,
+                      tournament.theme, tournament.tournament_state,
+                      f"T{tournament.format_overs}", len(tournament.participants),
+                      tournament.created_by, now,
                       json.dumps(tournament.bracket), tournament_json))
             else:
-                cur.execute("""
-                    INSERT OR REPLACE INTO tournaments 
-                    (name, type, theme, status, format, entry_fee, prize_pool,
-                     max_players, created_by, created_at, brackets, metadata)
-                    VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
-                """, (tournament.name, tournament.type, tournament.theme,
-                      tournament.tournament_state, f"T{tournament.format_overs}",
-                      len(tournament.participants), tournament.created_by, now,
-                      json.dumps(tournament.bracket), tournament_json))
+                # Check if exists
+                cur.execute("SELECT id FROM tournaments WHERE id = ?", 
+                           (tournament.tournament_id,))
+                
+                if cur.fetchone():
+                    cur.execute("""
+                        UPDATE tournaments SET
+                            name = ?, type = ?, theme = ?, status = ?,
+                            format = ?, max_players = ?, brackets = ?,
+                            metadata = ?
+                        WHERE id = ?
+                    """, (tournament.name, tournament.type, tournament.theme,
+                          tournament.tournament_state, f"T{tournament.format_overs}",
+                          len(tournament.participants),
+                          json.dumps(tournament.bracket), tournament_json,
+                          tournament.tournament_id))
+                else:
+                    cur.execute("""
+                        INSERT INTO tournaments 
+                        (id, name, type, theme, status, format, entry_fee, prize_pool,
+                         max_players, created_by, created_at, brackets, metadata)
+                        VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+                    """, (tournament.tournament_id, tournament.name, tournament.type,
+                          tournament.theme, tournament.tournament_state,
+                          f"T{tournament.format_overs}", len(tournament.participants),
+                          tournament.created_by, now,
+                          json.dumps(tournament.bracket), tournament_json))
             
-            logger.info(f"Tournament {tournament.tournament_id} saved to database")
+            # Save participants
+            for i, participant in enumerate(tournament.participants, 1):
+                if is_postgres:
+                    cur.execute("""
+                        INSERT INTO tournament_participants
+                        (tournament_id, user_id, position, joined_at)
+                        VALUES (%s, %s, %s, %s)
+                    """, (tournament.tournament_id, participant['user_id'], i, now))
+                else:
+                    cur.execute("""
+                        INSERT INTO tournament_participants
+                        (tournament_id, user_id, position, joined_at)
+                        VALUES (?, ?, ?, ?)
+                    """, (tournament.tournament_id, participant['user_id'], i, now))
+            
+            logger.info(f"Tournament {tournament.tournament_id} saved with {len(tournament.participants)} participants")
             
     except Exception as e:
         logger.error(f"Error saving tournament: {e}")
@@ -4014,6 +4191,82 @@ def generate_visual_shop_grid(user_id: int) -> str:
     return display
 
 
+
+def save_user_tournament_context(user_id: int, tournament_id: str, match_id: str = None):
+    """Save tournament context for user - survives restart"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            now = datetime.now(timezone.utc).isoformat()
+            
+            if is_postgres:
+                cur.execute("""
+                    INSERT INTO user_tournament_context 
+                    (user_id, tournament_id, current_match_id, last_updated)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (user_id, tournament_id)
+                    DO UPDATE SET 
+                        current_match_id = EXCLUDED.current_match_id,
+                        last_updated = EXCLUDED.last_updated
+                """, (user_id, tournament_id, match_id, now))
+            else:
+                # Check if exists
+                cur.execute("""
+                    SELECT user_id FROM user_tournament_context 
+                    WHERE user_id = ? AND tournament_id = ?
+                """, (user_id, tournament_id))
+                
+                if cur.fetchone():
+                    cur.execute("""
+                        UPDATE user_tournament_context 
+                        SET current_match_id = ?, last_updated = ?
+                        WHERE user_id = ? AND tournament_id = ?
+                    """, (match_id, now, user_id, tournament_id))
+                else:
+                    cur.execute("""
+                        INSERT INTO user_tournament_context 
+                        (user_id, tournament_id, current_match_id, last_updated)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, tournament_id, match_id, now))
+    except Exception as e:
+        logger.error(f"Error saving tournament context: {e}")
+
+
+def create_tournament_context_table():
+    """Create table for tournament persistence"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            
+            if is_postgres:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_tournament_context (
+                        user_id BIGINT NOT NULL,
+                        tournament_id TEXT NOT NULL,
+                        current_match_id TEXT,
+                        last_updated TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_id, tournament_id)
+                    )
+                """)
+            else:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_tournament_context (
+                        user_id INTEGER NOT NULL,
+                        tournament_id TEXT NOT NULL,
+                        current_match_id TEXT,
+                        last_updated TEXT DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_id, tournament_id)
+                    )
+                """)
+            
+            logger.info("✓ Tournament context table created")
+    except Exception as e:
+        logger.error(f"Error creating tournament context table: {e}")
+
+
+
 def generate_live_scorecard(game: GameState) -> str:
     """Create detailed live scorecard"""
     batting = game.data.get('batting')
@@ -4427,32 +4680,38 @@ def _award_xp(user_id: int, amount: int):
     UserLevelManager.update_user_level(user_id, amount)
 
 def create_daily_challenges():
-    """Create daily challenges for all users - FIXED VERSION"""
+    """Create daily challenges for all users - FIXED DATE FUNCTION"""
     try:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_iso = today_start.isoformat()
         
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
-            param_style = "%s" if is_postgres else "?"
             
-            # Check if challenges exist for today
-            cur.execute(f"""
-                SELECT COUNT(*) as count FROM daily_challenges 
-                WHERE DATE(created_at) = {param_style}
-            """, (today,))
+            # Check if challenges exist for today using ISO string comparison
+            if is_postgres:
+                cur.execute("""
+                    SELECT COUNT(*) as count FROM daily_challenges 
+                    WHERE created_at >= %s
+                """, (today_iso,))
+            else:
+                cur.execute("""
+                    SELECT COUNT(*) as count FROM daily_challenges 
+                    WHERE created_at >= ?
+                """, (today_iso,))
             
             result = cur.fetchone()
             count = result['count'] if result else 0
             
             if count > 0:
-                logger.info(f"Daily challenges already exist for {today}")
+                logger.info(f"Daily challenges already exist for today")
                 return
             
             # Generate new challenges
-            challenges = DailyChallenge.generate_daily_challenges(today)
+            challenges = DailyChallenge.generate_daily_challenges(today_iso)
             
-            logger.info(f"Generated {len(challenges)} challenges for {today}")
+            logger.info(f"Generated {len(challenges)} challenges for today")
             
             # Save challenges to database
             for challenge in challenges:
@@ -4466,12 +4725,12 @@ def create_daily_challenges():
                             created_at, expires_at
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """, (
-                        challenge.type.value, 
-                        challenge.description, 
+                        challenge.type.value,
+                        challenge.description,
                         challenge.target,
-                        challenge.reward_coins, 
-                        challenge.reward_xp, 
-                        now, 
+                        challenge.reward_coins,
+                        challenge.reward_xp,
+                        now,
                         expires
                     ))
                 else:
@@ -4481,16 +4740,16 @@ def create_daily_challenges():
                             created_at, expires_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (
-                        challenge.type.value, 
-                        challenge.description, 
+                        challenge.type.value,
+                        challenge.description,
                         challenge.target,
-                        challenge.reward_coins, 
-                        challenge.reward_xp, 
-                        now, 
+                        challenge.reward_coins,
+                        challenge.reward_xp,
+                        now,
                         expires
                     ))
             
-            logger.info(f"✓ Created {len(challenges)} daily challenges for {today}")
+            logger.info(f"✓ Created {len(challenges)} daily challenges")
             
     except Exception as e:
         logger.error(f"Error creating daily challenges: {e}", exc_info=True)
@@ -4810,39 +5069,74 @@ def handle_tournament_menu(chat_id: int, user_id: int):
 
 
 def show_all_tournaments(chat_id: int):
-    """List all active tournaments"""
+    """List all active tournaments - FIXED"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             is_postgres = bool(os.getenv("DATABASE_URL"))
             
+            # Get all active tournaments
             if is_postgres:
-                cur.execute("SELECT id, name, type, status FROM tournaments WHERE status IN ('registration', 'live') LIMIT 10")
+                cur.execute("""
+                    SELECT id, name, type, status, current_round, 
+                           (SELECT COUNT(*) FROM tournament_participants 
+                            WHERE tournament_id = tournaments.id) as participant_count
+                    FROM tournaments 
+                    WHERE status IN ('registration', 'live') 
+                    ORDER BY created_at DESC 
+                    LIMIT 10
+                """)
             else:
-                cur.execute("SELECT id, name, type, status FROM tournaments WHERE status IN ('registration', 'live') LIMIT 10")
+                cur.execute("""
+                    SELECT id, name, type, status, current_round, 
+                           (SELECT COUNT(*) FROM tournament_participants 
+                            WHERE tournament_id = tournaments.id) as participant_count
+                    FROM tournaments 
+                    WHERE status IN ('registration', 'live') 
+                    ORDER BY created_at DESC 
+                    LIMIT 10
+                """)
             
             tournaments = cur.fetchall()
         
         if not tournaments:
-            bot.send_message(chat_id, "No tournaments available right now.")
+            bot.send_message(
+                chat_id, 
+                "No tournaments available right now.\n\n"
+                "Use /tournaments to create one!",
+                reply_markup=kb_tournament_menu()
+            )
             return
         
-        text = "📊 AVAILABLE TOURNAMENTS\n\n"
+        text = "🏆 AVAILABLE TOURNAMENTS\n\n"
         kb = types.InlineKeyboardMarkup(row_width=1)
         
         for tournament in tournaments:
-            text += f"🏆 {tournament['name']} ({tournament['type'].upper()})\n"
-            kb.add(types.InlineKeyboardButton(
-                f"View {tournament['name']}", 
-                callback_data=f"tourn_view_{tournament['id']}"
-            ))
+            tourn_id = tournament['id']
+            name = tournament['name']
+            tourn_type = tournament['type']
+            status = tournament['status']
+            count = tournament['participant_count']
+            
+            text += f"🏆 {name}\n"
+            text += f"   Type: {tourn_type.upper()} | Status: {status.upper()}\n"
+            text += f"   Players: {count}/16\n\n"
+            
+            kb.add(
+                types.InlineKeyboardButton(
+                    f"View {name}", 
+                    callback_data=f"tourn_view_{tourn_id}"
+                )
+            )
         
+        kb.add(types.InlineKeyboardButton("➕ Create New", callback_data="tournament_create"))
         kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_menu"))
+        
         bot.send_message(chat_id, text, reply_markup=kb)
         
     except Exception as e:
         logger.error(f"Error showing tournaments: {e}")
-        bot.send_message(chat_id, "Error loading tournaments.")
+        bot.send_message(chat_id, "Error loading tournaments")
 
 
 def show_tournament_participants(chat_id: int, tournament_id: str):
@@ -5282,8 +5576,9 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
         if game_state.data['balls_in_over'] >= 6:
             game_state.data['balls_in_over'] = 0
             game_state.data['overs_bowled'] += 1
-            over_completed = True
             logger.info(f"Over {game_state.data['overs_bowled']} completed")
+            PowerUp.update_powerup_durations(game_state)
+            over_completed = True
         
         # STEP 6: CHECK MATCH END CONDITIONS AFTER EACH BALL
         match_ended = False
@@ -6204,10 +6499,7 @@ def show_user_stats(chat_id: int, user_id: int):
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            is_postgres = bool(os.getenv("DATABASE_URL"))
-            param_style = "%s" if is_postgres else "?"
-            
-            cur.execute(f"SELECT * FROM stats WHERE user_id={param_style}", (user_id,))
+            execute_query(cur, "SELECT * FROM users WHERE user_id = ?", (user_id,))
             stats = cur.fetchone()
             if not stats or stats["games_played"] == 0:
                 bot.send_message(chat_id, "📊 No statistics yet! Play your first match with /play")
@@ -6719,11 +7011,12 @@ def handle_game_input(message):
         number = int(message.text)
         chat_id = message.chat.id
         user_id = message.from_user.id
-        
+        lock = get_game_lock(chat_id)
         logger.info(f"Game input {number} from user {user_id} in chat {chat_id}")
         
         # Process the ball
-        result = enhanced_process_ball_v2(chat_id, number, user_id)
+        with lock:
+            result = enhanced_process_ball_v2(chat_id, number, user_id)
         
         if isinstance(result, str):
             # Error message
@@ -7881,6 +8174,8 @@ def cmd_profile(message):
             param_style = "%s" if is_postgres else "?"
             
             # Get user data
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
             cur.execute(f"SELECT * FROM users WHERE user_id = {param_style}", (user_id,))
             user = cur.fetchone()
             
@@ -8618,6 +8913,7 @@ def handle_tournament_start(call):
     """Start tournament if creator"""
     try:
         tournament_id = call.data.split('_')[2]
+        user_id = call.from_user.id
         tournament = load_tournament_from_db(tournament_id)
         
         if tournament and tournament.created_by == call.from_user.id:
@@ -9103,24 +9399,34 @@ def handle_create_tournament(chat_id: int, user_id: int):
 
 
 def handle_tournament_type_selection(chat_id: int, user_id: int, format_key: str):
-    """Ask for tournament type after format"""
-    set_user_session_data(user_id, "tournament_format", format_key)
-    set_user_session_data(user_id, "tournament_step", "type")
-    
-    text = (
-        "⚙️ CREATE TOURNAMENT\n\n"
-        "Step 2: Choose Type\n\n"
-        "Select tournament type:"
-    )
-    
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("🏆 Knockout", callback_data="type_knockout"),
-        types.InlineKeyboardButton("📊 League", callback_data="type_league")
-    )
-    kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_create"))
-    
-    bot.send_message(chat_id, text, reply_markup=kb)
+    """Ask for tournament type after format - FIXED"""
+    try:
+        format_map = {"fmt_5": 5, "fmt_10": 10, "fmt_20": 20}
+        overs = format_map.get(format_key, 10)
+        
+        set_user_session_data(user_id, "tournament_format", format_key)
+        set_user_session_data(user_id, "tournament_overs", overs)
+        set_user_session_data(user_id, "tournament_step", "type")
+        
+        text = (
+            "⚙️ CREATE TOURNAMENT\n\n"
+            f"Step 2: Choose Type\n"
+            f"Format: T{overs}\n\n"
+            "Select tournament type:"
+        )
+        
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            types.InlineKeyboardButton("🏆 Knockout", callback_data="type_knockout"),
+            types.InlineKeyboardButton("📊 League", callback_data="type_league")
+        )
+        kb.add(types.InlineKeyboardButton("🔙 Back", callback_data="tournament_create"))
+        
+        bot.send_message(chat_id, text, reply_markup=kb)
+        
+    except Exception as e:
+        logger.error(f"Error in tournament type selection: {e}")
+        bot.send_message(chat_id, "Error selecting tournament type")
 
 
 def finalize_tournament_creation(chat_id: int, user_id: int, theme: str):
@@ -9324,9 +9630,60 @@ def show_tournament_rankings(chat_id: int):
     bot.send_message(chat_id, "🥇 Tournament rankings feature coming soon!", reply_markup=kb_tournament_menu())
 
 def show_challenge_history(chat_id: int, user_id: int):
-    """Show challenge history - placeholder for now"""
-    bot.send_message(chat_id, "📊 Challenge history feature coming soon!", reply_markup=kb_challenges())
-
+    """Show challenge history - FIXED"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            is_postgres = bool(os.getenv("DATABASE_URL"))
+            param_style = "%s" if is_postgres else "?"
+            
+            # Get last 10 challenges user completed
+            if is_postgres:
+                cur.execute("""
+                    SELECT dc.id, dc.description, dc.reward_coins, dc.reward_xp, 
+                           uc.completed, uc.claimed, uc.updated_at
+                    FROM user_challenges uc
+                    JOIN daily_challenges dc ON uc.challenge_id = dc.id
+                    WHERE uc.user_id = %s
+                    ORDER BY uc.updated_at DESC
+                    LIMIT 20
+                """, (user_id,))
+            else:
+                cur.execute("""
+                    SELECT dc.id, dc.description, dc.reward_coins, dc.reward_xp, 
+                           uc.completed, uc.claimed, uc.updated_at
+                    FROM user_challenges uc
+                    JOIN daily_challenges dc ON uc.challenge_id = dc.id
+                    WHERE uc.user_id = ?
+                    ORDER BY uc.updated_at DESC
+                    LIMIT 20
+                """, (user_id,))
+            
+            history = cur.fetchall()
+        
+        if not history:
+            bot.send_message(
+                chat_id,
+                "📊 No challenge history yet!\n\nComplete challenges to see history here.",
+                reply_markup=kb_challenges()
+            )
+            return
+        
+        text = "📊 CHALLENGE HISTORY\n\n"
+        
+        for challenge in history:
+            status_emoji = "✅" if challenge['claimed'] else "🔄" if challenge['completed'] else "⏳"
+            text += (
+                f"{status_emoji} {challenge['description']}\n"
+                f"   Reward: {challenge['reward_coins']} coins | {challenge['reward_xp']} XP\n"
+                f"   Date: {str(challenge['updated_at'])[:10]}\n\n"
+            )
+        
+        bot.send_message(chat_id, text, reply_markup=kb_challenges())
+        
+    except Exception as e:
+        logger.error(f"Error showing challenge history: {e}")
+        bot.send_message(chat_id, "Error loading history")
 
 @bot.message_handler(commands=['dbversion'])
 def cmd_db_version(message: types.Message):
@@ -9636,7 +9993,6 @@ def ban_user_admin(message):
         bot.send_message(message.chat.id, "Usage: /ban <user_id> <temporary|extended|permanent> [reason]")
 
 
-import time
 start_time = time.time()
 
 

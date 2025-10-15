@@ -6019,10 +6019,15 @@ def upsert_user(u: types.User):
 
 # Keyboard definitions
 def kb_main_menu() -> types.InlineKeyboardMarkup:
+    """Enhanced main menu with shop"""
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("🏏 Quick Play", callback_data="quick_play"),
         types.InlineKeyboardButton("⚙️ Custom Match", callback_data="custom_match")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🛒 Shop", callback_data="shop_menu"),
+        types.InlineKeyboardButton("⚡ Power-ups", callback_data="powerups_menu")
     )
     kb.add(
         types.InlineKeyboardButton("🏆 Tournaments", callback_data="tournament_menu"),
@@ -6034,8 +6039,9 @@ def kb_main_menu() -> types.InlineKeyboardMarkup:
     )
     kb.add(
         types.InlineKeyboardButton("🏅 Achievements", callback_data="achievements"),
-        types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
+        types.InlineKeyboardButton("💼 Profile", callback_data="my_profile")
     )
+    kb.add(types.InlineKeyboardButton("ℹ️ Help", callback_data="help"))
     return kb
 
 def kb_difficulty_select() -> types.InlineKeyboardMarkup:
@@ -6264,6 +6270,31 @@ def recover_game_state(chat_id: int):
     except Exception as e:
         logger.error(f"Error recovering game state: {e}")
         return None
+
+
+def check_and_notify_unlocks(user_id: int, chat_id: int):
+    """Check for newly unlocked items"""
+    try:
+        progress = get_user_shop_progress(user_id)
+        newly_unlocked = []
+        
+        for item_id, item in CRICKET_SHOP_ITEMS.items():
+            if not item.unlock_requirement:
+                continue
+            
+            unlock_info = get_item_unlock_progress(user_id, item_id)
+            
+            if unlock_info["unlocked"]:
+                last_notified = get_user_session_data(user_id, f"notified_{item_id}", False)
+                
+                if not last_notified:
+                    newly_unlocked.append(item_id)
+                    set_user_session_data(user_id, f"notified_{item_id}", True)
+        
+        for item_id in newly_unlocked:
+            ShopUnlockNotifier.show_unlock_notification(chat_id, user_id, item_id)
+    except Exception as e:
+        logger.error(f"Error checking unlocks: {e}")
 
 
 def show_leaderboard(chat_id: int, category: str = "wins"):
@@ -6502,8 +6533,17 @@ def cmd_start(message):
             "/powerups - Power-ups shop\n"
             "/help - Show all commands"
         )
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        keyboard.add(
+            types.KeyboardButton("📋 Menu"),
+            types.KeyboardButton("🏏 Play")
+        )
+        keyboard.add(
+            types.KeyboardButton("🛒 Shop"),
+            types.KeyboardButton("📊 Stats")
+        )
         
-        bot.send_message(message.chat.id, welcome_text)
+        bot.send_message(message.chat.id, welcome_text, reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Error in start command: {e}")
 
@@ -6750,6 +6790,31 @@ def handle_forfeit_request(message: types.Message):
     except Exception as e:
         logger.error(f"Error handling forfeit request: {e}")
         bot.send_message(message.chat.id, "❌ Error processing your request.")
+
+
+@bot.message_handler(commands=['menu', 'mainmenu', 'm'])
+@rate_limit_check('command')
+def cmd_main_menu(message):
+    """Show main menu - accessible anytime"""
+    try:
+        user_id = message.from_user.id
+        ensure_user_exists(user_id, message.from_user.username, message.from_user.first_name)
+        
+        level_info = _get_user_level_info(user_id)
+        user_coins = _get_user_coins(user_id)
+        
+        menu_text = (
+            f"🏏 <b>CRICKET BOT MAIN MENU</b>\n"
+            f"{'═'*40}\n\n"
+            f"👤 Level: {level_info['level']} | 💰 Coins: {user_coins}\n"
+            f"📈 XP: {level_info['experience']}/{level_info['next_level_xp']}\n\n"
+            f"Choose an option below:"
+        )
+        
+        bot.send_message(message.chat.id, menu_text, reply_markup=kb_main_menu())
+    except Exception as e:
+        logger.error(f"Error in main menu: {e}")
+
 
 @bot.message_handler(commands=['addcoins'])
 def cmd_add_coins(message):
@@ -7220,6 +7285,53 @@ def handle_bat_bowl_callback(call):
         bot.answer_callback_query(call.id, "Error starting match")
 
 
+@bot.callback_query_handler(func=lambda call: call.data == 'shop_menu')
+@rate_limit_check('callback')
+def handle_shop_menu_callback(call):
+    """Show shop from main menu"""
+    try:
+        send_shop_menu(call.message.chat.id, call.from_user.id)
+        bot.answer_callback_query(call.id, "🛒 Opening shop...")
+    except Exception as e:
+        logger.error(f"Error opening shop: {e}")
+        bot.answer_callback_query(call.id, "Error opening shop")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'powerups_menu')
+@rate_limit_check('callback')
+def handle_powerups_menu_callback(call):
+    """Show powerups from main menu"""
+    try:
+        user_coins = _get_user_coins(call.from_user.id)
+        
+        shop_text = (
+            "⚡ <b>POWER-UPS SHOP</b>\n"
+            f"{'═'*40}\n"
+            f"💰 Your Balance: <b>{user_coins} coins</b>\n\n"
+        )
+        
+        for powerup_id, powerup in PowerUp.POWERUPS.items():
+            cost = powerup['cost']
+            status = "✅" if user_coins >= cost else "🔒"
+            
+            shop_text += (
+                f"{status} <b>{powerup['name']}</b>\n"
+                f"   {powerup['description']}\n"
+                f"   ⏱️ Duration: {powerup['duration']} over(s)\n"
+                f"   💰 Cost: {cost} coins\n\n"
+            )
+        
+        bot.edit_message_text(
+            shop_text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=kb_powerups_shop()
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing powerups: {e}")
+
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_powerup_'))
 @rate_limit_check('callback')
@@ -7600,6 +7712,14 @@ def cmd_powerups(message):
         logger.error(f"Error in powerups command: {e}")
         bot.reply_to(message, "❌ Error loading power-ups shop")
 
+
+@bot.message_handler(func=lambda msg: msg.text and "📋" in msg.text)
+def handle_menu_button(message):
+    cmd_main_menu(message)
+
+@bot.message_handler(func=lambda msg: msg.text and "🛒" in msg.text)
+def handle_shop_button(message):
+    send_shop_menu(message.chat.id, message.from_user.id)
 
 
 @bot.message_handler(commands=['achievements'])
@@ -8809,7 +8929,9 @@ def handle_match_completion(chat_id: int, user_id: int, game: GameState):
         
         # Update stats
         update_user_stats_after_match(user_id, game, result)
-        
+
+        check_and_notify_unlocks(user_id, chat_id)
+
         # Save to history
         save_match_to_history(chat_id, user_id, game, result, margin)
         

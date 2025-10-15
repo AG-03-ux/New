@@ -5313,8 +5313,8 @@ def enhanced_process_ball_v2(chat_id: int, user_value: int, user_id: int):
                 current_score = game_state.data['bot_score']
             
             # IMPORTANT: End match immediately when target is EXCEEDED
-            if current_score > target:
-                logger.info(f"MATCH END: Target exceeded! Score {current_score} > Target {target}")
+            if current_score >= target:  # Changed from > to >=
+                logger.info(f"MATCH END: Target achieved! Score {current_score} >= Target {target}")
                 match_ended = True
         
         # STEP 7: Handle match end or continue game
@@ -6019,7 +6019,7 @@ def upsert_user(u: types.User):
 
 # Keyboard definitions
 def kb_main_menu() -> types.InlineKeyboardMarkup:
-    """Enhanced main menu with shop"""
+    """Enhanced main menu WITHOUT powerups (now in shop)"""
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("🏏 Quick Play", callback_data="quick_play"),
@@ -6027,21 +6027,20 @@ def kb_main_menu() -> types.InlineKeyboardMarkup:
     )
     kb.add(
         types.InlineKeyboardButton("🛒 Shop", callback_data="shop_menu"),
-        types.InlineKeyboardButton("⚡ Power-ups", callback_data="powerups_menu")
+        types.InlineKeyboardButton("🏆 Tournaments", callback_data="tournament_menu")
     )
     kb.add(
-        types.InlineKeyboardButton("🏆 Tournaments", callback_data="tournament_menu"),
-        types.InlineKeyboardButton("🎯 Challenges", callback_data="challenges")
-    )
-    kb.add(
-        types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats"),
-        types.InlineKeyboardButton("🥇 Leaderboard", callback_data="leaderboard")
+        types.InlineKeyboardButton("🎯 Challenges", callback_data="challenges"),
+        types.InlineKeyboardButton("📊 My Stats", callback_data="my_stats")
     )
     kb.add(
         types.InlineKeyboardButton("🏅 Achievements", callback_data="achievements"),
         types.InlineKeyboardButton("💼 Profile", callback_data="my_profile")
     )
-    kb.add(types.InlineKeyboardButton("ℹ️ Help", callback_data="help"))
+    kb.add(
+        types.InlineKeyboardButton("🥇 Leaderboard", callback_data="leaderboard"),
+        types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
+    )
     return kb
 
 def kb_difficulty_select() -> types.InlineKeyboardMarkup:
@@ -6680,13 +6679,15 @@ def cmd_commands(message):
         logger.error(f"Error in /commands handler: {e}")
 
 
-@bot.message_handler(commands=['stats'])
+@bot.message_handler(func=lambda msg: msg.text and "📊" in msg.text)
 def cmd_stats(message):
+    """Handle stats button"""
     try:
-        logger.info(f"Received /stats from user {message.from_user.id}")
-        bot.send_message(message.chat.id, "📊 Your stats will be shown here (feature in development)")
+        ensure_user(message)
+        show_user_stats(message.chat.id, message.from_user.id)
     except Exception as e:
-        logger.error(f"Error in /stats handler: {e}", exc_info=True)
+        logger.error(f"Error handling stats button: {e}")
+        bot.send_message(message.chat.id, "❌ Error loading stats.")
 
 @bot.message_handler(commands=["leaderboard"])
 def cmd_leaderboard(message: types.Message):
@@ -7142,6 +7143,17 @@ def handle_callback(call):
         logger.error(f"Error in callback handler: {e}", exc_info=True)
         bot.answer_callback_query(call.id, "An error occurred")
 
+@bot.callback_query_handler(func=lambda call: call.data == 'shop_menu')
+@rate_limit_check('callback')
+def handle_shop_menu_main(call):
+    """Handle shop menu from main menu"""
+    try:
+        send_shop_menu(call.message.chat.id, call.from_user.id)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error in shop menu: {e}")
+        bot.answer_callback_query(call.id, "Error opening shop")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('lb_'))
 @rate_limit_check('callback')
@@ -7206,13 +7218,23 @@ def handle_challenges_view_callback(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'challenges_claim')
 def handle_challenges_claim_callback(call):
-    claim_challenge_rewards(call.message.chat.id, call.from_user.id)
-    bot.answer_callback_query(call.id)
+    """Claim challenge rewards - WORKING VERSION"""
+    try:
+        claim_challenge_rewards(call.message.chat.id, call.from_user.id)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        bot.answer_callback_query(call.id, "Error claiming rewards")
 
 @bot.callback_query_handler(func=lambda call: call.data == 'challenges_history')
 def handle_challenges_history_callback(call):
-    show_challenge_history(call.message.chat.id, call.from_user.id)
-    bot.answer_callback_query(call.id)
+    """Show challenge history - WORKING VERSION"""
+    try:
+        show_challenge_history(call.message.chat.id, call.from_user.id)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        bot.answer_callback_query(call.id, "Error loading history")
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ["toss_heads", "toss_tails"])
@@ -7230,6 +7252,11 @@ def handle_toss_callback(call):
     except Exception as e:
         logger.error(f"Error in toss callback: {e}")
         bot.answer_callback_query(call.id, "Error processing toss")
+
+@bot.message_handler(func=lambda msg: msg.text and "🏏" in msg.text)
+def handle_play_button(message):
+    """Handle Play button from /start"""
+    cmd_play(message)
 
 
 @bot.message_handler(commands=['coins'])
@@ -7295,6 +7322,33 @@ def handle_shop_menu_callback(call):
     except Exception as e:
         logger.error(f"Error opening shop: {e}")
         bot.answer_callback_query(call.id, "Error opening shop")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'my_profile')
+@rate_limit_check('callback')
+def handle_profile_callback(call):
+    """Show user profile"""
+    try:
+        cmd_profile(call.message)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing profile: {e}")
+        bot.answer_callback_query(call.id, "Error loading profile")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'achievements')
+@rate_limit_check('callback')
+def handle_achievements_callback(call):
+    """Show achievements"""
+    try:
+        achievements = AchievementSystem.get_user_achievements(call.from_user.id)
+        display = AchievementSystem.generate_achievement_display(achievements)
+        bot.send_message(call.message.chat.id, display, parse_mode="HTML")
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error showing achievements: {e}")
+        bot.answer_callback_query(call.id, "Error loading achievements")
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'powerups_menu')
 @rate_limit_check('callback')
@@ -7390,37 +7444,12 @@ def handle_scorecard_view(call):
 @bot.callback_query_handler(func=lambda call: call.data == 'challenges_view')
 @rate_limit_check('callback')
 def handle_challenges_view(call):
-    """Show active challenges"""
+    """Show daily challenges - WORKING VERSION"""
     try:
-        tracker = ChallengeTracker(call.from_user.id)
-        
-        if not tracker.active_challenges:
-            message = "📋 No active challenges!\nChallenges reset daily at midnight UTC."
-        else:
-            message = "📋 DAILY CHALLENGES\n" + "═" * 40 + "\n\n"
-            
-            for challenge in tracker.active_challenges:
-                progress = tracker.progress.get(challenge['id'], 0)
-                target = challenge['target']
-                completed = challenge.get('completed', False)
-                
-                status = "✅" if completed else f"{progress}/{target}"
-                
-                message += (
-                    f"{challenge.get('icon', '🎯')} {challenge['description']}\n"
-                    f"   Progress: {status}\n"
-                    f"   Reward: {challenge['reward_coins']} coins | {challenge['reward_xp']} XP\n\n"
-                )
-        
-        bot.edit_message_text(
-            message,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=kb_challenges()
-        )
+        show_daily_challenges(call.message.chat.id, call.from_user.id)
         bot.answer_callback_query(call.id)
     except Exception as e:
-        logger.error(f"Error viewing challenges: {e}")
+        logger.error(f"Error: {e}")
         bot.answer_callback_query(call.id, "Error loading challenges")
 
 
@@ -7759,7 +7788,7 @@ def cmd_leaderboard(message):
 @bot.message_handler(commands=['inventory'])
 @rate_limit_check('command')
 def cmd_inventory(message):
-    """Show user inventory - FIXED VERSION"""
+    """Show user inventory - ALL ITEMS VERSION"""
     try:
         user_id = message.from_user.id
         
@@ -7768,35 +7797,21 @@ def cmd_inventory(message):
             is_postgres = bool(os.getenv("DATABASE_URL"))
             param_style = "%s" if is_postgres else "?"
             
-            # Check if user_inventory table exists
-            try:
-                cur.execute(f"""
-                    SELECT item_type, item_id, quantity
-                    FROM user_inventory
-                    WHERE user_id = {param_style}
-                """, (user_id,))
-                
-                items = cur.fetchall()
-            except Exception as e:
-                logger.error(f"Inventory table query failed: {e}")
-                # Table might not exist, create it
-                text = (
-                    "🎒 YOUR INVENTORY\n"
-                    f"{'═'*40}\n\n"
-                    "Your inventory is empty!\n\n"
-                    "💡 Purchase power-ups with /powerups\n"
-                    "💰 Earn coins by playing matches!"
-                )
-                bot.send_message(message.chat.id, text)
-                return
+            cur.execute(f"""
+                SELECT item_type, item_id, quantity
+                FROM user_inventory
+                WHERE user_id = {param_style}
+            """, (user_id,))
+            
+            items = cur.fetchall()
             
             if not items or len(items) == 0:
                 text = (
                     "🎒 YOUR INVENTORY\n"
                     f"{'═'*40}\n\n"
                     "Your inventory is empty!\n\n"
-                    "💡 Purchase power-ups with /powerups\n"
-                    "💰 Earn coins by playing matches!"
+                    "🛒 Purchase items from /shop\n"
+                    "⚡ Buy power-ups with /powerups"
                 )
             else:
                 text = (
@@ -7804,53 +7819,53 @@ def cmd_inventory(message):
                     f"{'═'*40}\n\n"
                 )
                 
-                # Group items by type
+                # Group by category
+                equipment = []
+                gloves = []
+                helmets = []
                 powerups = []
-                other_items = []
+                other = []
                 
                 for item in items:
                     item_type = item['item_type']
                     item_id = item['item_id']
-                    quantity = item['quantity']
+                    qty = item['quantity']
                     
                     if item_type == 'powerup' and item_id in PowerUp.POWERUPS:
                         powerup = PowerUp.POWERUPS[item_id]
-                        powerups.append(f"• {powerup['name']} x{quantity}")
+                        powerups.append(f"• {powerup['name']} x{qty}")
+                    elif item_id in CRICKET_SHOP_ITEMS:
+                        shop_item = CRICKET_SHOP_ITEMS[item_id]
+                        if shop_item.category == 'equipment':
+                            equipment.append(f"• {shop_item.emoji} {shop_item.name} x{qty}")
+                        elif shop_item.category == 'gloves':
+                            gloves.append(f"• {shop_item.emoji} {shop_item.name} x{qty}")
+                        elif shop_item.category == 'helmets':
+                            helmets.append(f"• {shop_item.emoji} {shop_item.name} x{qty}")
                     else:
-                        other_items.append(f"• {item_id} x{quantity}")
+                        other.append(f"• {item_id} x{qty}")
                 
+                if equipment:
+                    text += "🏏 <b>EQUIPMENT:</b>\n" + "\n".join(equipment) + "\n\n"
+                if gloves:
+                    text += "🧤 <b>GLOVES:</b>\n" + "\n".join(gloves) + "\n\n"
+                if helmets:
+                    text += "🪖 <b>HELMETS:</b>\n" + "\n".join(helmets) + "\n\n"
                 if powerups:
-                    text += "💪 <b>POWER-UPS:</b>\n"
-                    text += "\n".join(powerups)
-                    text += "\n\n"
-                
-                if other_items:
-                    text += "🎁 <b>OTHER ITEMS:</b>\n"
-                    text += "\n".join(other_items)
-                    text += "\n\n"
+                    text += "⚡ <b>POWER-UPS:</b>\n" + "\n".join(powerups) + "\n\n"
+                if other:
+                    text += "📦 <b>OTHER:</b>\n" + "\n".join(other) + "\n\n"
                 
                 text += (
                     f"{'─'*40}\n"
-                    "💡 Use power-ups before matches to gain advantages!\n"
-                    "🛒 Purchase more with /powerups"
+                    "💡 Equip items before matches to use them!"
                 )
             
             bot.send_message(message.chat.id, text, parse_mode="HTML")
             
     except Exception as e:
-        logger.error(f"Error in inventory command: {e}", exc_info=True)
-        
-        # Send user-friendly error message
-        error_text = (
-            "🎒 YOUR INVENTORY\n"
-            f"{'═'*40}\n\n"
-            "Unable to load inventory at the moment.\n\n"
-            "This could mean:\n"
-            "• You haven't purchased any items yet\n"
-            "• Database is initializing\n\n"
-            "Try /powerups to view the shop!"
-        )
-        bot.send_message(message.chat.id, error_text)
+        logger.error(f"Error in inventory: {e}", exc_info=True)
+        bot.send_message(message.chat.id, "❌ Error loading inventory.")
 
 
 @bot.message_handler(commands=['profile'])
